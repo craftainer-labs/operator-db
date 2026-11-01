@@ -29,8 +29,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	samplev1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
-	"github.com/craftainer-labs/operator-db/internal/controller"
+	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
 	webhookv1alpha1 "github.com/craftainer-labs/operator-db/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -47,7 +46,7 @@ var scheme = newScheme()
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(s))
-	utilruntime.Must(samplev1alpha1.AddToScheme(s))
+	utilruntime.Must(dbv1alpha1.AddToScheme(s))
 	// +kubebuilder:scaffold:scheme
 	return s
 }
@@ -218,31 +217,29 @@ type setupStep struct {
 	fn   func(ctrl.Manager) error
 }
 
-// setup registers the controllers, the probes, and the webhooks when they are
-// enabled.
+// setup registers the probes, and the webhooks when they are enabled. The
+// controllers are registered here too, as they are added.
 func setup(mgr ctrl.Manager, webhooks bool) error {
 	steps := []setupStep{
-		{"greeting controller", setupGreetingController},
 		{"probes", func(mgr ctrl.Manager) error { return addChecks(mgr) }},
 	}
 	if webhooks {
-		steps = append(steps, setupStep{"greeting webhook", webhookv1alpha1.SetupGreetingWebhookWithManager})
+		steps = append(steps,
+			setupStep{"ClusterDatabaseServer webhook", webhookv1alpha1.SetupClusterDatabaseServerWebhookWithManager},
+			setupStep{"DatabaseServer webhook", webhookv1alpha1.SetupDatabaseServerWebhookWithManager})
 	}
 	// +kubebuilder:scaffold:builder
+	return runSteps(mgr, steps)
+}
+
+// runSteps runs the setup steps in order and stops at the first failure.
+func runSteps(mgr ctrl.Manager, steps []setupStep) error {
 	for _, step := range steps {
 		if err := step.fn(mgr); err != nil {
 			return fmt.Errorf("set up the %s: %w", step.name, err)
 		}
 	}
 	return nil
-}
-
-func setupGreetingController(mgr ctrl.Manager) error {
-	return (&controller.GreetingReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder(EventRecorderName),
-	}).SetupWithManager(mgr)
 }
 
 // serveProbes answers /healthz and /readyz without a cluster, until ctx is

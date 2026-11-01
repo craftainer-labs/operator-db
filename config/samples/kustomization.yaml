@@ -1,4 +1,7 @@
 ## Append samples of your project ##
 resources:
-- sample_v1alpha1_greeting.yaml
+- db_v1alpha1_clusterdatabaseserver.yaml
+- db_v1alpha1_databaseserver.yaml
+- db_v1alpha1_database.yaml
+- db_v1alpha1_databaserole.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

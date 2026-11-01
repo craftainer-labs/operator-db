@@ -1,0 +1,20 @@
+apiVersion: db.craftainer.dev/v1alpha1
+kind: ClusterDatabaseServer
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-db
+    app.kubernetes.io/managed-by: kustomize
+  name: shared-pg
+spec:
+  host: pg.data.svc.cluster.local
+  sslMode: verify-full
+  tls:
+    caBundle:
+      secretRef: {name: pg-ca, key: ca.crt}
+  adminCredentialsSecretRef: {name: pg-admin, namespace: operator-db-system}
+  allowedNamespaces:
+    from: Selector
+    selector:
+      matchExpressions:
+        - {key: kubernetes.io/metadata.name, operator: In, values: [team-a, team-b]}
+  allowedExtensions: [pgcrypto, uuid-ossp]

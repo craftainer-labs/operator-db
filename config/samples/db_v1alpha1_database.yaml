@@ -1,0 +1,11 @@
+apiVersion: db.craftainer.dev/v1alpha1
+kind: Database
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-db
+    app.kubernetes.io/managed-by: kustomize
+  name: orders
+  namespace: team-a
+spec:
+  serverRef: {kind: ClusterDatabaseServer, name: shared-pg}
+  extensions: [pgcrypto]

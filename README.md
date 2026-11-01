@@ -1,33 +1,37 @@
-# template-k8s-operator
+# operator-db
 
 > [!NOTE]
 > This repository is vibe coded with [Claude](https://claude.com/product/claude-code).
 
-A template for Kubernetes operators written in Go on
-[kubebuilder](https://book.kubebuilder.io/) v4: an instance of
-[`template-docker`](https://github.com/craftainer/template-docker) (and so of
-[`template-base`](https://github.com/craftainer/template-base)) that is itself
-a template. Create an operator from it and get:
+A Kubernetes operator that provisions PostgreSQL databases and roles inside an
+existing server, from Kubernetes objects. It is an instance of
+[`template-k8s-operator`](https://github.com/craftainer/template-k8s-operator)
+(and so of `template-docker` and `template-base`); `docs/TEMPLATE.md` describes
+the layout, tooling and release flow it inherits, and is kept up to date by
+template sync.
 
-- the kubebuilder v4 layout and a sample API (`Greeting`, group
-  `sample.craftainer.dev`) that follows the family's CRD conventions;
-- a manager with leader election, authenticated HTTPS metrics, probes and
-  cert-manager-issued webhook certificates;
-- unit tests, envtest suites and a kind + [Chainsaw](https://kyverno.github.io/chainsaw/)
-  end-to-end test, behind a 100% coverage gate on hand-written code;
-- a Helm chart ([kubebuilder `helm/v2-alpha`](https://book.kubebuilder.io/plugins/available/helm-v2-alpha)),
-  published as OCI;
-- an OLM bundle and file-based catalog ([operator-sdk](https://sdk.operatorframework.io/),
-  installable with OLM v0 and OLM v1's `ClusterExtension`);
-- a distroless static `nonroot` image that runs under an arbitrary UID;
-- the Go tooling of `template-go-module` (pinned, checksummed toolchain,
-  golangci-lint v2, govulncheck) and signed, attested releases.
+## API group `db.craftainer.dev`
 
-See [`docs/TEMPLATE.md`](docs/TEMPLATE.md) for how it works and what an
-instance changes, and [`docs/adrs/`](docs/adrs/) for why
-([0002](docs/adrs/0002-kubernetes-operator-template.md) the template's design,
-[0003](docs/adrs/0003-release-extras-and-supply-chain.md) release extras and
-the supply chain).
+All kinds are `v1alpha1`. The fields, defaults and validation follow
+[`docs/crd-drafts.md`](https://github.com/craftainer-labs/lib-operator-go/blob/main/docs/crd-drafts.md)
+and [ADR 0002](https://github.com/craftainer-labs/lib-operator-go/blob/main/docs/adrs/0002-operator-crd-conventions.md)
+of `lib-operator-go`, whose `pkg/apis/common` types the API embeds.
+
+| Kind | Scope | Purpose |
+| --- | --- | --- |
+| `ClusterDatabaseServer` | cluster | a PostgreSQL server; `allowedNamespaces` says which namespaces may use it |
+| `DatabaseServer` | namespaced | a server a team brings itself; serves only its own namespace |
+| `Database` | namespaced | a database on a server (data kind: `deletionPolicy`, no binding Secret) |
+| `DatabaseRole` | namespaced | a login with `ReadOnly`, `ReadWrite` or `Owner` access to one `Database`; credentials go to a `servicebinding.io/postgresql` Secret |
+
+The CRDs are generated from the Go types in `api/v1alpha1` (`make manifests
+generate`) into `config/crd/bases` and `charts/chart/templates/crd`. Schema
+defaults and the OpenAPI and CEL rules are in the CRD; the validating webhooks in
+`internal/webhook/v1alpha1` check only what the schema cannot (a server's `host`
+and `proxyURL`).
+
+The controllers, the PostgreSQL client and the chart's operator settings are not
+in yet; the manager serves the webhooks and the probes.
 
 ## Quick start
 
@@ -43,39 +47,13 @@ make operator-help # every operator target
 prek run --all-files --hook-stage manual   # all checks
 ```
 
-Releases go through `release.yml` as in `template-docker`; right after each
-one, dispatch `release-extras.yml` to publish the chart, bundle and catalog
-and to sign and attest them:
+Releases go through `release.yml`; right after each one, dispatch
+`release-extras.yml` to publish the chart, bundle and catalog (see
+`docs/TEMPLATE.md`):
 
 ```sh
 gh workflow run release-extras.yml -f tag=vX.Y.Z
 ```
-
-It never publishes over an existing tag. If a run failed part-way (say the
-chart and bundle were pushed and signing failed), finish it with
-`-f resume=true`: artifacts whose tag exists are not pushed again, their
-existing digests are signed (not again if they already verify) but never
-attested, and missing ones are published and attested. SLSA provenance must
-describe the run that built the artifact, so a resumed run does not claim it:
-an existing artifact without provenance is named in a warning, and if
-provenance is required for it, cut a new patch version instead.
-
-## Creating an operator from this template
-
-1. Create the repository from this template, then set
-   `.github/template-sync-state.json` to `craftainer/template-docker` at the
-   tag the template was created at (a repository created from a template
-   starts with its parent's state file).
-2. Rename: the Go module in `go.mod` and every import, `OPERATOR_NAME`,
-   `LeaderElectionID` and `EventRecorderName` in `internal/app`, the chart
-   (`charts/chart/Chart.yaml`, `values.yaml`: `manager.image.repository`), the
-   CSV base file and its name in `config/manifests`, `namePrefix` and
-   `namespace` in the kustomizations, and the labels in `config/`.
-3. Replace the sample API: `kubebuilder create api` / `create webhook` for your
-   kinds, delete `Greeting`, run `make manifests generate`, update the chart
-   (see `docs/TEMPLATE.md`, "Helm chart") and `test/e2e/operator`.
-4. Set the repository variable `OCI_REGISTRY=ghcr.io` (the image release and
-   `release-extras.yml` both use it).
 
 ## License
 

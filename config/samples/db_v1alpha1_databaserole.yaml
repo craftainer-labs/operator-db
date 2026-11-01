@@ -1,0 +1,14 @@
+apiVersion: db.craftainer.dev/v1alpha1
+kind: DatabaseRole
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-db
+    app.kubernetes.io/managed-by: kustomize
+  name: orders-app
+  namespace: team-a
+spec:
+  serverRef: {kind: ClusterDatabaseServer, name: shared-pg}
+  databaseRef: {name: orders}
+  privileges: ReadWrite
+  binding: {secretName: orders-db}
+  rotationPolicy: {interval: 720h, gracePeriod: 2h}

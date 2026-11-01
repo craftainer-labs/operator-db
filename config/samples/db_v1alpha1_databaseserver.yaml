@@ -1,0 +1,11 @@
+apiVersion: db.craftainer.dev/v1alpha1
+kind: DatabaseServer
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-db
+    app.kubernetes.io/managed-by: kustomize
+  name: team-pg
+  namespace: team-a
+spec:
+  host: pg.team-a.svc.cluster.local
+  adminCredentialsSecretRef: {name: team-pg-admin}

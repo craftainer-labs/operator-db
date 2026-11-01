@@ -262,20 +262,23 @@ func TestRunWithPlainMetricsAndNoWebhooks(t *testing.T) {
 	g.Expect(stop()).To(Succeed())
 }
 
-func TestRunRejectsASecondControllerWithTheSameName(t *testing.T) {
+func TestRunSteps(t *testing.T) {
 	g := NewWithT(t)
-	args := []string{"--health-probe-bind-address=0", "--metrics-bind-address=0", "--webhook-port=-1"}
+	var ran []string
+	step := func(name string, err error) setupStep {
+		return setupStep{name, func(ctrl.Manager) error { ran = append(ran, name); return err }}
+	}
+	boom := errors.New("boom")
 
-	// Names are checked process-wide, so the first run registers "greeting"
-	// and the second must fail while setting up the controller.
-	stop := start(t, args)
-	defer func() { _ = stop() }()
-	time.Sleep(2 * time.Second)
-	g.Expect(stop()).To(Succeed())
+	g.Expect(runSteps(nil, []setupStep{step("a", nil), step("b", nil)})).To(Succeed())
+	g.Expect(ran).To(Equal([]string{"a", "b"}))
 
-	err := Run(context.Background(), args, getConfig, io.Discard)
-	g.Expect(err).To(HaveOccurred())
-	g.Expect(err.Error()).To(ContainSubstring("set up the greeting controller"))
+	// The first failure stops the run and names the step.
+	ran = nil
+	err := runSteps(nil, []setupStep{step("a", nil), step("b", boom), step("c", nil)})
+	g.Expect(err).To(MatchError(boom))
+	g.Expect(err.Error()).To(ContainSubstring("set up the b"))
+	g.Expect(ran).To(Equal([]string{"a", "b"}))
 }
 
 type fakeChecks struct{ healthzErr, readyzErr error }

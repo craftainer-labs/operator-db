@@ -5,7 +5,7 @@ metadata:
     alm-examples: '[]'
     capabilities: Basic Install
     categories: Developer Tools
-    description: A Kubernetes operator built from craftainer-labs/operator-db.
+    description: A Kubernetes operator that provisions PostgreSQL databases and roles (db.craftainer.dev).
     # Pod Security `restricted` and a suggested install namespace for OLM v0
     # (OLM v1 installs into the ClusterExtension's namespace).
     operatorframework.io/suggested-namespace: operator-db-system
@@ -22,15 +22,36 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
-    - description: Greeting is the Schema for the greetings API.
-      displayName: Greeting
-      kind: Greeting
-      name: greetings.sample.craftainer.dev
+    - description: ClusterDatabaseServer is a cluster-scoped PostgreSQL server that
+        claims in the namespaces allowedNamespaces admits can use.
+      displayName: Cluster Database Server
+      kind: ClusterDatabaseServer
+      name: clusterdatabaseservers.db.craftainer.dev
+      version: v1alpha1
+    - description: DatabaseServer is a namespaced PostgreSQL server for a team that
+        brings its own.
+      displayName: Database Server
+      kind: DatabaseServer
+      name: databaseservers.db.craftainer.dev
+      version: v1alpha1
+    - description: Database is a PostgreSQL database on a ClusterDatabaseServer or
+        a DatabaseServer.
+      displayName: Database
+      kind: Database
+      name: databases.db.craftainer.dev
+      version: v1alpha1
+    - description: DatabaseRole is a PostgreSQL login with access to one Database.
+      displayName: Database Role
+      kind: DatabaseRole
+      name: databaseroles.db.craftainer.dev
       version: v1alpha1
   description: |-
-    A sample operator. Instances replace this text with what the operator does,
-    how to configure it and what it needs from the cluster.
-  displayName: Template K8s Operator
+    Provisions PostgreSQL databases and roles from Kubernetes objects. A
+    ClusterDatabaseServer (or a namespaced DatabaseServer) describes a server;
+    a Database and a DatabaseRole in a tenant namespace claim a database and a
+    login on it, and the login's credentials are written to a Secret of type
+    servicebinding.io/postgresql.
+  displayName: Database Operator
   install:
     spec:
       deployments: null

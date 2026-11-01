@@ -15,14 +15,39 @@ repo: github.com/craftainer-labs/operator-db
 resources:
 - api:
     crdVersion: v1
-    namespaced: true
-  controller: true
   domain: craftainer.dev
-  group: sample
-  kind: Greeting
+  group: db
+  kind: ClusterDatabaseServer
   path: github.com/craftainer-labs/operator-db/api/v1alpha1
   version: v1alpha1
   webhooks:
     validation: true
     webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: craftainer.dev
+  group: db
+  kind: DatabaseServer
+  path: github.com/craftainer-labs/operator-db/api/v1alpha1
+  version: v1alpha1
+  webhooks:
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: craftainer.dev
+  group: db
+  kind: Database
+  path: github.com/craftainer-labs/operator-db/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: craftainer.dev
+  group: db
+  kind: DatabaseRole
+  path: github.com/craftainer-labs/operator-db/api/v1alpha1
+  version: v1alpha1
 version: "3"

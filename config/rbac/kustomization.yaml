@@ -22,6 +22,15 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the operator-db itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- greeting_admin_role.yaml
-- greeting_editor_role.yaml
-- greeting_viewer_role.yaml
+- clusterdatabaseserver_admin_role.yaml
+- clusterdatabaseserver_editor_role.yaml
+- clusterdatabaseserver_viewer_role.yaml
+- databaseserver_admin_role.yaml
+- databaseserver_editor_role.yaml
+- databaseserver_viewer_role.yaml
+- database_admin_role.yaml
+- database_editor_role.yaml
+- database_viewer_role.yaml
+- databaserole_admin_role.yaml
+- databaserole_editor_role.yaml
+- databaserole_viewer_role.yaml

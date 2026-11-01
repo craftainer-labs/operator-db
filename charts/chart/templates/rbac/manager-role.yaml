@@ -11,28 +11,12 @@ metadata:
   name: {{ include "operator-db.resourceName" (dict "suffix" "manager-role" "context" $) }}
 rules:
 - apiGroups:
-  - ""
+  - db.craftainer.dev
   resources:
-  - configmaps
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-- apiGroups:
-  - sample.craftainer.dev
-  resources:
-  - greetings
+  - clusterdatabaseservers
+  - databaseroles
+  - databases
+  - databaseservers
   verbs:
   - get
   - list
@@ -40,15 +24,21 @@ rules:
   - update
   - watch
 - apiGroups:
-  - sample.craftainer.dev
+  - db.craftainer.dev
   resources:
-  - greetings/finalizers
+  - clusterdatabaseservers/finalizers
+  - databaseroles/finalizers
+  - databases/finalizers
+  - databaseservers/finalizers
   verbs:
   - update
 - apiGroups:
-  - sample.craftainer.dev
+  - db.craftainer.dev
   resources:
-  - greetings/status
+  - clusterdatabaseservers/status
+  - databaseroles/status
+  - databases/status
+  - databaseservers/status
   verbs:
   - get
   - patch
