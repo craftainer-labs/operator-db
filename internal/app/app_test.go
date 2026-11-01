@@ -21,6 +21,7 @@ import (
 	"time"
 
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/config"
@@ -262,20 +263,33 @@ func TestRunWithPlainMetricsAndNoWebhooks(t *testing.T) {
 	g.Expect(stop()).To(Succeed())
 }
 
-func TestRunRejectsASecondControllerWithTheSameName(t *testing.T) {
+func TestRunReportsASetupError(t *testing.T) {
 	g := NewWithT(t)
-	args := []string{"--health-probe-bind-address=0", "--metrics-bind-address=0", "--webhook-port=-1"}
-
-	// Names are checked process-wide, so the first run registers "greeting"
-	// and the second must fail while setting up the controller.
-	stop := start(t, args)
-	defer func() { _ = stop() }()
-	time.Sleep(2 * time.Second)
-	g.Expect(stop()).To(Succeed())
-
-	err := Run(context.Background(), args, getConfig, io.Discard)
+	// A webhook cannot be registered for a type the scheme does not know.
+	emptyScheme := func(o *ctrl.Options) { o.Scheme = runtime.NewScheme() }
+	args := []string{"--health-probe-bind-address=0", "--metrics-bind-address=0"}
+	err := Run(context.Background(), args, getConfig, io.Discard, emptyScheme)
 	g.Expect(err).To(HaveOccurred())
-	g.Expect(err.Error()).To(ContainSubstring("set up the greeting controller"))
+	g.Expect(err.Error()).To(ContainSubstring("set up the ClusterDatabaseServer webhook"))
+}
+
+func TestRunSteps(t *testing.T) {
+	g := NewWithT(t)
+	var ran []string
+	step := func(name string, err error) setupStep {
+		return setupStep{name, func(ctrl.Manager) error { ran = append(ran, name); return err }}
+	}
+	boom := errors.New("boom")
+
+	g.Expect(runSteps(nil, []setupStep{step("a", nil), step("b", nil)})).To(Succeed())
+	g.Expect(ran).To(Equal([]string{"a", "b"}))
+
+	// The first failure stops the run and names the step.
+	ran = nil
+	err := runSteps(nil, []setupStep{step("a", nil), step("b", boom), step("c", nil)})
+	g.Expect(err).To(MatchError(boom))
+	g.Expect(err.Error()).To(ContainSubstring("set up the b"))
+	g.Expect(ran).To(Equal([]string{"a", "b"}))
 }
 
 type fakeChecks struct{ healthzErr, readyzErr error }

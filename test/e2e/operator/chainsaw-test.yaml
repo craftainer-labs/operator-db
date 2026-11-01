@@ -1,6 +1,7 @@
 # Installs the Helm chart into a Pod Security `restricted` namespace, with the
-# manager running as an arbitrary UID, then exercises the sample API end to
-# end. The steps run in order; the cluster is thrown away afterwards.
+# manager running as an arbitrary UID, then exercises the API (CRDs, schema
+# defaults and rules, webhooks) end to end. The steps run in order; the
+# cluster is thrown away afterwards.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -18,7 +19,7 @@ spec:
             timeout: 5m
             env:
               - name: RELEASE
-                value: template-k8s-operator
+                value: operator-db
             content: |
               set -eu
               helm upgrade --install "$RELEASE" "$E2E_CHART_DIR" --namespace "$NAMESPACE" \
@@ -33,12 +34,12 @@ spec:
               apiVersion: apps/v1
               kind: Deployment
               metadata:
-                name: template-k8s-operator-controller-manager
+                name: operator-db-controller-manager
               status:
                 availableReplicas: 1
       cleanup:
         - script:
-            content: helm uninstall template-k8s-operator --namespace "$NAMESPACE" --ignore-not-found
+            content: helm uninstall operator-db --namespace "$NAMESPACE" --ignore-not-found
 
     - name: runs as an arbitrary UID with leader election
       try:
@@ -54,115 +55,110 @@ spec:
               apiVersion: coordination.k8s.io/v1
               kind: Lease
               metadata:
-                name: template-k8s-operator.craftainer.dev
+                name: operator-db.craftainer.dev
               (spec.holderIdentity != null): true
 
-    - name: a Greeting becomes Ready
+    - name: the CRDs are established
       try:
-        - apply:
-            file: greeting.yaml
-        - assert:
-            file: greeting-ready.yaml
         - assert:
             resource:
-              apiVersion: v1
-              kind: ConfigMap
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
               metadata:
-                name: hello
-              data:
-                message: Hello from Chainsaw
-        - apply:
-            resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              metadata:
-                name: hello
-              spec:
-                message: Bonjour de Chainsaw
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: hello
-              data:
-                message: Bonjour de Chainsaw
-        - assert:
-            resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              metadata:
-                name: hello
+                name: clusterdatabaseservers.db.craftainer.dev
               status:
-                observedGeneration: 2
-                (conditions[?type == 'Ready'] | [0].status): "True"
+                (conditions[?type == 'Established'] | [0].status): "True"
+        - assert:
+            resource:
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              metadata:
+                name: databaseservers.db.craftainer.dev
+              status:
+                (conditions[?type == 'Established'] | [0].status): "True"
+        - assert:
+            resource:
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              metadata:
+                name: databases.db.craftainer.dev
+              status:
+                (conditions[?type == 'Established'] | [0].status): "True"
+        - assert:
+            resource:
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              metadata:
+                name: databaseroles.db.craftainer.dev
+              status:
+                (conditions[?type == 'Established'] | [0].status): "True"
 
-    - name: the webhook rejects a blank message
+    - name: the schema defaults a DatabaseServer
       try:
         - apply:
             resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
+              apiVersion: db.craftainer.dev/v1alpha1
+              kind: DatabaseServer
               metadata:
-                name: blank
+                name: defaults
               spec:
-                message: "   "
+                host: pg.example.svc
+                adminCredentialsSecretRef:
+                  name: pg-admin
+        - assert:
+            resource:
+              apiVersion: db.craftainer.dev/v1alpha1
+              kind: DatabaseServer
+              metadata:
+                name: defaults
+              spec:
+                port: 5432
+                adminDatabase: postgres
+                sslMode: verify-full
+      cleanup:
+        - delete:
+            ref:
+              apiVersion: db.craftainer.dev/v1alpha1
+              kind: DatabaseServer
+              name: defaults
+
+    - name: the webhook rejects a bad host
+      try:
+        - apply:
+            resource:
+              apiVersion: db.craftainer.dev/v1alpha1
+              kind: ClusterDatabaseServer
+              metadata:
+                name: bad-host
+              spec:
+                host: "not a host"
+                adminCredentialsSecretRef:
+                  name: pg-admin
+                  namespace: ($namespace)
+                allowedNamespaces:
+                  from: All
             expect:
               - check:
                   ($error != null): true
-                  (contains($error, 'non-blank')): true
+                  (contains($error, 'host name or an IP address')): true
 
-    - name: deleting a Greeting deletes its ConfigMap
-      try:
-        - delete:
-            ref:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              name: hello
-        - error:
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: hello
-
-    - name: deletionPolicy Retain keeps the ConfigMap
+    - name: the schema rejects a cluster server without allowedNamespaces
       try:
         - apply:
             resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
+              apiVersion: db.craftainer.dev/v1alpha1
+              kind: ClusterDatabaseServer
               metadata:
-                name: keeper
+                name: open
               spec:
-                message: kept
-                deletionPolicy: Retain
-        - assert:
-            resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              metadata:
-                name: keeper
-              status:
-                (conditions[?type == 'Ready'] | [0].status): "True"
-        - delete:
-            ref:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              name: keeper
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: keeper
-              data:
-                message: kept
-        - script:
-            content: |
-              set -eu
-              owners=$(kubectl get configmap keeper -n "$NAMESPACE" -o jsonpath='{.metadata.ownerReferences}')
-              test -z "$owners"
+                host: pg.example.svc
+                adminCredentialsSecretRef:
+                  name: pg-admin
+                  namespace: ($namespace)
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'allowedNamespaces')): true
 
     - name: metrics need a token
       try:
@@ -170,10 +166,10 @@ spec:
             timeout: 5m
             content: |
               set -eu
-              svc="template-k8s-operator-controller-manager-metrics-service.${NAMESPACE}.svc:8443"
+              svc="operator-db-controller-manager-metrics-service.${NAMESPACE}.svc:8443"
               kubectl create serviceaccount metrics-client -n "$NAMESPACE"
               kubectl create clusterrolebinding "e2e-metrics-${NAMESPACE}" \
-                --clusterrole=template-k8s-operator-metrics-reader --serviceaccount="${NAMESPACE}:metrics-client"
+                --clusterrole=operator-db-metrics-reader --serviceaccount="${NAMESPACE}:metrics-client"
               token=$(kubectl create token metrics-client -n "$NAMESPACE")
               # curl runs in `default`: the test namespace enforces `restricted`.
               kubectl run "metrics-curl" -n default --rm -i --restart=Never \
@@ -183,7 +179,7 @@ spec:
                   echo anonymous=\$anon
                   test \"\$anon\" = 401 -o \"\$anon\" = 403
                   curl -ks -H 'Authorization: Bearer ${token}' https://${svc}/metrics > /tmp/m
-                  grep -q '^greeting_reconcile_total' /tmp/m
+                  grep -q '^go_goroutines' /tmp/m
                   echo authenticated metrics ok"
       cleanup:
         - script:

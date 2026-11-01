@@ -1,6 +1,11 @@
-// Package v1alpha1 contains API Schema definitions for the sample v1alpha1 API group.
+// Package v1alpha1 contains the API schema definitions of the
+// db.craftainer.dev v1alpha1 group: the PostgreSQL servers, databases and
+// roles that operator-db provisions. The shared blocks (claim, server and
+// credential specs and statuses) are lib-operator-go's pkg/apis/common types,
+// embedded here; docs/crd-drafts.md and ADR 0002 of lib-operator-go are their
+// specification.
 // +kubebuilder:object:generate=true
-// +groupName=sample.craftainer.dev
+// +groupName=db.craftainer.dev
 package v1alpha1
 
 import (
@@ -12,7 +17,7 @@ import (
 var (
 	// SchemeGroupVersion is group version used to register these objects.
 	// This name is used by applyconfiguration generators (e.g. controller-gen).
-	SchemeGroupVersion = schema.GroupVersion{Group: "sample.craftainer.dev", Version: "v1alpha1"}
+	SchemeGroupVersion = schema.GroupVersion{Group: "db.craftainer.dev", Version: "v1alpha1"}
 
 	// GroupVersion is an alias for SchemeGroupVersion, for backward compatibility.
 	GroupVersion = SchemeGroupVersion
