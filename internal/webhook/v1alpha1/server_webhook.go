@@ -113,20 +113,17 @@ func validateServer(host, proxyURL string) error {
 		errs = append(errs, fmt.Errorf("%w: %q", ErrInvalidHost, host))
 	}
 	if proxyURL != "" && !validProxyURL(proxyURL) {
-		errs = append(errs, fmt.Errorf("%w: %q", ErrInvalidProxyURL, proxyURL))
+		// The value is left out of the message: a proxy URL may carry
+		// credentials, and admission errors reach logs and kubectl output.
+		errs = append(errs, ErrInvalidProxyURL)
 	}
 	return errors.Join(errs...)
 }
 
 // validHost reports whether host is an IP address or a DNS-1123 subdomain
-// (case-insensitive, as host names are; one trailing dot, as in a fully
-// qualified name, is allowed).
+// (case-insensitive, as host names are).
 func validHost(host string) bool {
-	if net.ParseIP(host) != nil {
-		return true
-	}
-	name := strings.ToLower(strings.TrimSuffix(host, "."))
-	return len(validation.IsDNS1123Subdomain(name)) == 0
+	return net.ParseIP(host) != nil || len(validation.IsDNS1123Subdomain(strings.ToLower(host))) == 0
 }
 
 // validProxyURL reports whether raw is an http, https or socks5 URL with a host.
