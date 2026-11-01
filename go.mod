@@ -1,4 +1,4 @@
-module github.com/craftainer/template-k8s-operator
+module github.com/craftainer-labs/operator-db
 
 go 1.26.0
 

@@ -5,18 +5,18 @@ metadata:
     alm-examples: '[]'
     capabilities: Basic Install
     categories: Developer Tools
-    description: A Kubernetes operator built from craftainer/template-k8s-operator.
+    description: A Kubernetes operator built from craftainer-labs/operator-db.
     # Pod Security `restricted` and a suggested install namespace for OLM v0
     # (OLM v1 installs into the ClusterExtension's namespace).
-    operatorframework.io/suggested-namespace: template-k8s-operator-system
+    operatorframework.io/suggested-namespace: operator-db-system
     # OpenShift infrastructure features (EB-5): "disconnected" is true when
     # every image the operator runs is listed in spec.relatedImages (the
     # bundle step pins and lists the manager image). Add "proxy-aware" once
     # the operator honours HTTP(S)_PROXY/NO_PROXY, and "fips-compliant" for a
     # build with GOFIPS140 (see the Dockerfile) run with GODEBUG=fips140=on.
     operators.openshift.io/infrastructure-features: '["disconnected"]'
-    repository: https://github.com/craftainer/template-k8s-operator
-  name: template-k8s-operator.v0.0.0
+    repository: https://github.com/craftainer-labs/operator-db
+  name: operator-db.v0.0.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -51,7 +51,7 @@ spec:
   - craftainer
   links:
   - name: Source
-    url: https://github.com/craftainer/template-k8s-operator
+    url: https://github.com/craftainer-labs/operator-db
   maintainers:
   - email: maintainers@example.com
     name: Maintainers
