@@ -21,6 +21,7 @@ import (
 	"time"
 
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/config"
@@ -260,6 +261,16 @@ func TestRunWithPlainMetricsAndNoWebhooks(t *testing.T) {
 	waitForOK(t, "http://"+probe+"/healthz")
 	waitForOK(t, "http://"+metrics+"/metrics")
 	g.Expect(stop()).To(Succeed())
+}
+
+func TestRunReportsASetupError(t *testing.T) {
+	g := NewWithT(t)
+	// A webhook cannot be registered for a type the scheme does not know.
+	emptyScheme := func(o *ctrl.Options) { o.Scheme = runtime.NewScheme() }
+	args := []string{"--health-probe-bind-address=0", "--metrics-bind-address=0"}
+	err := Run(context.Background(), args, getConfig, io.Discard, emptyScheme)
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("set up the ClusterDatabaseServer webhook"))
 }
 
 func TestRunSteps(t *testing.T) {
