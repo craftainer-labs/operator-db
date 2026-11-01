@@ -158,6 +158,8 @@ spec:
             x-kubernetes-validations:
             - message: serverRef.kind must be ClusterDatabaseServer or DatabaseServer
               rule: self.serverRef.kind in ['ClusterDatabaseServer', 'DatabaseServer']
+            - message: locale cannot be set or unset once the Database exists
+              rule: has(oldSelf.locale) == has(self.locale)
           status:
             description: status defines the observed state of Database
             properties:

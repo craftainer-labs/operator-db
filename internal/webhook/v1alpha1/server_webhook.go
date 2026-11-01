@@ -119,9 +119,14 @@ func validateServer(host, proxyURL string) error {
 }
 
 // validHost reports whether host is an IP address or a DNS-1123 subdomain
-// (case-insensitive, as host names are).
+// (case-insensitive, as host names are; one trailing dot, as in a fully
+// qualified name, is allowed).
 func validHost(host string) bool {
-	return net.ParseIP(host) != nil || len(validation.IsDNS1123Subdomain(strings.ToLower(host))) == 0
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	name := strings.ToLower(strings.TrimSuffix(host, "."))
+	return len(validation.IsDNS1123Subdomain(name)) == 0
 }
 
 // validProxyURL reports whether raw is an http, https or socks5 URL with a host.

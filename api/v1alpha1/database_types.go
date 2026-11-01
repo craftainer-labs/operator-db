@@ -11,6 +11,7 @@ import (
 // carries deletionPolicy and has no binding Secret (access comes from a
 // DatabaseRole).
 // +kubebuilder:validation:XValidation:rule="self.serverRef.kind in ['ClusterDatabaseServer', 'DatabaseServer']",message="serverRef.kind must be ClusterDatabaseServer or DatabaseServer"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.locale) == has(self.locale)",message="locale cannot be set or unset once the Database exists"
 type DatabaseSpec struct {
 	common.ClaimCommon `json:",inline"`
 	common.DataClaim   `json:",inline"`

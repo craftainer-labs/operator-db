@@ -191,6 +191,14 @@ func TestDatabaseDefaultsAndRules(t *testing.T) {
 	g.Expect(err).To(HaveOccurred())
 	g.Expect(err.Error()).To(ContainSubstring("locale is immutable"))
 
+	// A locale cannot be added to a Database created without one.
+	g.Expect(d.Spec.Locale).To(BeEmpty())
+	d.Spec.ServerRef.Name = "shared"
+	d.Spec.Locale = "C"
+	err = k8sClient.Update(ctx, d)
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("locale cannot be set or unset"))
+
 	dotted := databaseObj("has.dot")
 	invalid(t, dotted, "metadata.name must be lower-case alphanumerics")
 
