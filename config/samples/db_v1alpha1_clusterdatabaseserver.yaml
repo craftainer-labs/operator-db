@@ -10,7 +10,7 @@ spec:
   sslMode: verify-full
   tls:
     caBundle:
-      secretRef: {name: pg-ca, key: ca.crt}
+      secretRef: {name: pg-ca}  # key defaults to ca.crt
   adminCredentialsSecretRef: {name: pg-admin, namespace: operator-db-system}
   allowedNamespaces:
     from: Selector
