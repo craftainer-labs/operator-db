@@ -157,6 +157,21 @@ func TestServerDefaultsAndRules(t *testing.T) {
 	invalid(t, badTLS, "exactly one of secretRef and configMapRef")
 }
 
+func TestCABundleKeyDefaultsToCACrt(t *testing.T) {
+	g := NewWithT(t)
+
+	s := serverObj("ca-default-key")
+	s.Spec.TLS = &common.TLS{CABundle: &common.CABundle{SecretRef: &common.KeyReference{Name: "pg-ca"}}}
+	g.Expect(k8sClient.Create(ctx, s)).To(Succeed())
+	g.Expect(s.Spec.TLS.CABundle.SecretRef.Key).To(Equal("ca.crt"))
+	g.Expect(s.Spec.TLS.CABundle.SecretRef.KeyOrDefault()).To(Equal("ca.crt"))
+
+	cm := serverObj("ca-explicit-key")
+	cm.Spec.TLS = &common.TLS{CABundle: &common.CABundle{ConfigMapRef: &common.KeyReference{Name: "pg-ca", Key: "bundle.pem"}}}
+	g.Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+	g.Expect(cm.Spec.TLS.CABundle.ConfigMapRef.Key).To(Equal("bundle.pem"))
+}
+
 func TestDatabaseDefaultsAndRules(t *testing.T) {
 	g := NewWithT(t)
 
