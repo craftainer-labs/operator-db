@@ -303,7 +303,7 @@ const (
 
 // ApplyRole creates what is missing and makes the rest match: the NOLOGIN
 // owner role, both logins as its members with SET ROLE to it, the active
-// login's password, the privileges on the database and, last, the marker. The
+// login's password (as a SCRAM verifier), the privileges on the database and, last, the marker. The
 // other login keeps its state, because it may be the previous generation of a
 // rotation.
 //
@@ -315,6 +315,12 @@ const (
 // privileges that were not applied.
 func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 	grants, err := privilegeStatements(p.Base, p.Privileges)
+	if err != nil {
+		return err
+	}
+	// The server gets the SCRAM-SHA-256 verifier, never the password, so
+	// statement logging cannot capture it.
+	verifier, err := ScramVerifier(p.Password)
 	if err != nil {
 		return err
 	}
@@ -346,7 +352,7 @@ func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 		}
 		alter := "ALTER ROLE " + login + " WITH CONNECTION LIMIT " + limit
 		if gen == p.Marker.Active {
-			alter = "ALTER ROLE " + login + " WITH LOGIN PASSWORD " + Literal(p.Password) + " CONNECTION LIMIT " + limit
+			alter = "ALTER ROLE " + login + " WITH LOGIN PASSWORD " + Literal(verifier) + " CONNECTION LIMIT " + limit
 		}
 		stmts = append(stmts, alter, "GRANT "+base+" TO "+login, "ALTER ROLE "+login+" SET role = "+Literal(p.Base))
 	}
@@ -395,15 +401,21 @@ func privilegeStatements(base, privileges string) ([]string, error) {
 	}, nil
 }
 
-// Retire disables the login of gen and clears its password. It succeeds when
-// the role is already gone.
+// Retire disables the login of gen, clears its password and ends its open
+// sessions (NOLOGIN stops new ones only). It succeeds when the role is already
+// gone.
 func (a Admin) Retire(ctx context.Context, base, gen string) error {
 	st, err := a.Role(ctx, base)
 	if err != nil || !st.Login(gen).Exists {
 		return err
 	}
+	login := LoginName(base, gen)
 	return a.with(ctx, "", func(s Session) error {
-		return s.Exec(ctx, "ALTER ROLE "+Ident(LoginName(base, gen))+" WITH NOLOGIN PASSWORD NULL")
+		if err := s.Exec(ctx, "ALTER ROLE "+Ident(login)+" WITH NOLOGIN PASSWORD NULL"); err != nil {
+			return err
+		}
+		_, err := s.Query(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = "+Literal(login))
+		return err
 	})
 }
 

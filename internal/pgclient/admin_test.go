@@ -272,7 +272,7 @@ func TestApplyRole(t *testing.T) {
 		// Every role is created with its ownership marker in the same query.
 		`|CREATE ROLE "team-a_app_x" NOLOGIN; COMMENT ON ROLE "team-a_app_x" IS 'craftainer.dev/claim=team-a/app/uid-1'`,
 		`|CREATE ROLE "team-a_app_x_a" NOLOGIN; COMMENT ON ROLE "team-a_app_x_a" IS 'craftainer.dev/claim=team-a/app/uid-1'`,
-		`|ALTER ROLE "team-a_app_x_a" WITH LOGIN PASSWORD 'p''w' CONNECTION LIMIT 7`,
+		`|ALTER ROLE "team-a_app_x_a" WITH LOGIN PASSWORD 'SCRAM-SHA-256$4096:`,
 		`|ALTER ROLE "team-a_app_x_b" WITH CONNECTION LIMIT 7`,
 		`|GRANT "team-a_app_x" TO "team-a_app_x_a"`,
 		`|ALTER ROLE "team-a_app_x_b" SET role = 'team-a_app_x'`,
@@ -280,7 +280,7 @@ func TestApplyRole(t *testing.T) {
 		`|GRANT CONNECT ON DATABASE "team-a_db_y" TO "team-a_app_x"`,
 		`team-a_db_y|GRANT USAGE ON SCHEMA public TO "team-a_app_x"`,
 		`team-a_db_y|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "team-a_app_x"`)
-	f.wantNot(t, "GRANT ALL ON DATABASE")
+	f.wantNot(t, "GRANT ALL ON DATABASE", "p'w", "p''w")
 
 	// A second login that exists is left alone, and Owner gets ALL.
 	f = &fakePG{rows: roleRows(p.Base, true)}
@@ -308,6 +308,13 @@ func TestApplyRole(t *testing.T) {
 	if err := f.admin().ApplyRole(ctx, p); !errors.Is(err, errBoom) {
 		t.Errorf("observe failure: %v", err)
 	}
+	// A password that has no verifier is refused before any statement.
+	f = &fakePG{}
+	bad = p
+	bad.Password = "pässword"
+	if err := f.admin().ApplyRole(ctx, bad); !errors.Is(err, ErrPasswordNotASCII) || len(f.stmts) != 0 {
+		t.Errorf("non-ASCII password: %v, %v", err, f.stmts)
+	}
 	f = &fakePG{failOn: "CREATE ROLE"}
 	if err := f.admin().ApplyRole(ctx, p); !errors.Is(err, errBoom) {
 		t.Errorf("role failure: %v", err)
@@ -324,7 +331,8 @@ func TestRetire(t *testing.T) {
 	if err := f.admin().Retire(ctx, "r", GenA); err != nil {
 		t.Fatal(err)
 	}
-	f.want(t, `|ALTER ROLE "r_a" WITH NOLOGIN PASSWORD NULL`)
+	f.want(t, `|ALTER ROLE "r_a" WITH NOLOGIN PASSWORD NULL`,
+		`|SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'r_a'`)
 
 	// A login that is already gone is fine.
 	f = &fakePG{}
@@ -332,9 +340,11 @@ func TestRetire(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.wantNot(t, "ALTER ROLE")
-	f = &fakePG{failOn: "pg_roles"}
-	if err := f.admin().Retire(ctx, "r", GenA); !errors.Is(err, errBoom) {
-		t.Errorf("observe failure: %v", err)
+	for _, fail := range []string{"pg_roles", "NOLOGIN", "pg_terminate_backend"} {
+		f = &fakePG{rows: roleRows("r", true), failOn: fail}
+		if err := f.admin().Retire(ctx, "r", GenA); !errors.Is(err, errBoom) {
+			t.Errorf("failOn %q: %v", fail, err)
+		}
 	}
 }
 

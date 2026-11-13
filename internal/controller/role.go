@@ -12,7 +12,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
@@ -78,13 +82,44 @@ func (r *RoleReconciler) checkDatabase(ctx context.Context, role *dbv1alpha1.Dat
 	return db.GetExternalName(), nil
 }
 
-// SetupWithManager registers the controller; it also watches the binding
-// Secrets it owns.
+// databaseRefIndex indexes DatabaseRoles by the name of the Database they use.
+const databaseRefIndex = ".spec.databaseRef.name"
+
+func indexDatabaseRef(o client.Object) []string {
+	return []string{o.(*dbv1alpha1.DatabaseRole).Spec.DatabaseRef.Name}
+}
+
+// rolesOfDatabase maps a Database to the DatabaseRoles of its namespace that
+// name it, so a role that waits for its Database is reconciled when the
+// Database changes (is created, gets its name, is deleted).
+func rolesOfDatabase(c client.Reader) handler.MapFunc {
+	return func(ctx context.Context, o client.Object) []reconcile.Request {
+		var list dbv1alpha1.DatabaseRoleList
+		if err := c.List(ctx, &list, client.InNamespace(o.GetNamespace()), client.MatchingFields{databaseRefIndex: o.GetName()}); err != nil {
+			log.FromContext(ctx).Error(err, "cannot list the roles of a Database", "database", o.GetName())
+			return nil
+		}
+		reqs := make([]reconcile.Request, len(list.Items))
+		for i := range list.Items {
+			reqs[i] = reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])}
+		}
+		return reqs
+	}
+}
+
+// SetupWithManager registers the controller. It also watches the binding
+// Secrets it owns (every change, so an edited Secret is repaired) and the
+// Databases its claims name (so a role that waits for its Database goes on
+// when the Database has its name). Only the claims themselves pass the
+// lifecycle filter.
 func (r *RoleReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &dbv1alpha1.DatabaseRole{}, databaseRefIndex, indexDatabaseRef); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&dbv1alpha1.DatabaseRole{}).
+		For(&dbv1alpha1.DatabaseRole{}, builder.WithPredicates(lifecycle.Predicates())).
 		Owns(&corev1.Secret{}).
-		WithEventFilter(lifecycle.Predicates()).
+		Watches(&dbv1alpha1.Database{}, handler.EnqueueRequestsFromMapFunc(rolesOfDatabase(mgr.GetClient()))).
 		Named("databaserole").
 		Complete(r)
 }

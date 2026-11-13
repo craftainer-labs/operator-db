@@ -168,11 +168,19 @@ func (s *settings) webhookServer() webhook.Server {
 // can point it elsewhere.
 var serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
+// ErrNoOperatorNamespace means the namespace of the operator could not be
+// determined: neither --operator-namespace (or $POD_NAMESPACE) nor the service
+// account of the pod names it.
+var ErrNoOperatorNamespace = errors.New("cannot determine the operator namespace: set --operator-namespace or POD_NAMESPACE, or run in a pod with a service account")
+
 // controllerSettings are the flags the controllers need, validated.
 type controllerSettings struct {
 	egress    egress.Policy
 	deletion  common.DeletionPolicy
 	namespace string
+	// servers is shared by both reconcilers, so a server's connections are
+	// reused across reconciles.
+	servers *controller.ServerCache
 }
 
 // controllerSettings validates the egress mode and the default deletion policy
@@ -193,9 +201,17 @@ func (s *settings) controllerSettings() (controllerSettings, error) {
 			ns = strings.TrimSpace(string(b))
 		}
 	}
+	if ns == "" {
+		// Every cluster server is resolved in this namespace, so an empty one
+		// would fail each reconcile with a confusing error instead.
+		return controllerSettings{}, ErrNoOperatorNamespace
+	}
 	ctrl.Log.WithName("setup").Info("controller settings", "egressMode", string(mode),
 		"defaultDataDeletionPolicy", string(policy), "operatorNamespace", ns)
-	return controllerSettings{egress: egress.NewPolicy(mode), deletion: policy, namespace: ns}, nil
+	return controllerSettings{
+		egress: egress.NewPolicy(mode), deletion: policy, namespace: ns,
+		servers: controller.NewServerCache(controller.ServerIdleTimeout),
+	}, nil
 }
 
 // Option adjusts the manager's options; tests use it, the binary passes none.
@@ -299,7 +315,7 @@ func setup(mgr ctrl.Manager, webhooks bool, cs controllerSettings) error {
 	cfg := controller.Config{
 		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder(EventRecorderName),
 		ManagedBy: EventRecorderName, OperatorNamespace: cs.namespace, DefaultDeletionPolicy: cs.deletion,
-		Egress: cs.egress, Connect: pgclient.Connect,
+		Egress: cs.egress, Connect: pgclient.Connect, Cache: cs.servers,
 	}
 	steps = append(steps,
 		setupStep{"Database controller", (&controller.DatabaseReconciler{Config: cfg}).SetupWithManager},

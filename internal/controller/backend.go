@@ -6,11 +6,16 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
+	"strconv"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -49,6 +54,9 @@ type Config struct {
 	DefaultDeletionPolicy common.DeletionPolicy
 	Egress                egress.Policy
 	Connect               ConnectFunc
+	// Cache keeps the connection pool of each server between reconciles; nil
+	// opens a connection for every use.
+	Cache *ServerCache
 	// Now is the clock of the lifecycle (rotation and grace periods); nil is
 	// time.Now. Tests advance it.
 	Now func() time.Time
@@ -66,14 +74,19 @@ type backend struct {
 // fields, and the admin Admin whose connections dial through the egress policy
 // and the server's proxy.
 func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*backend, error) {
+	cacheKey := serverKey(ns, ref)
 	conn, err := server.Resolve(ctx, c.Client, ns, ref, server.WithOperatorNamespace(c.OperatorNamespace))
 	if err != nil {
+		if errors.Is(err, server.ErrServerNotFound) {
+			c.Cache.Forget(cacheKey)
+		}
 		return nil, err
 	}
-	spec, err := c.serverSpec(ctx, ns, ref)
+	obj, err := c.fetchServer(ctx, ns, ref)
 	if err != nil {
 		return nil, err
 	}
+	spec := obj.spec
 	dial, err := c.Egress.Dialer(conn.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, err)
@@ -83,18 +96,66 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 		return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrAdminCredentials)
 	}
 	target := pgclient.Target{
-		Host: spec.Host, Port: portOf(spec.Port), User: string(user), Password: string(pass),
+		Host: spec.Host, Port: portOf(spec.Port), Database: spec.AdminDatabase, User: string(user), Password: string(pass),
 		ServerName: conn.ServerName, CABundle: conn.CABundle, MinTLS: conn.MinTLSVersion, Dial: dial,
 	}
-	open := func(ctx context.Context, database string) (pgclient.Session, error) {
-		t := target
-		t.Database = database
-		if t.Database == "" {
-			t.Database = spec.AdminDatabase
-		}
-		return c.Connect(ctx, t)
+	maxIdle := 0 // without a cache nobody would close an idle session
+	if c.Cache != nil {
+		maxIdle = serverMaxIdle
 	}
-	return &backend{admin: pgclient.Admin{Open: open}, spec: spec, conn: conn}, nil
+	pool := c.Cache.Get(cacheKey, stamp(obj, target, conn.Proxy), func() *pgclient.Pool {
+		return pgclient.NewPool(c.Connect, target, maxIdle, serverSessionTTL)
+	})
+	return &backend{admin: pgclient.Admin{Open: pool.Open}, spec: spec, conn: conn}, nil
+}
+
+// serverMaxIdle and serverSessionTTL bound the idle admin sessions of a
+// server: a few, for a short time, so a restarted server costs one retry.
+const (
+	serverMaxIdle    = 2
+	serverSessionTTL = 30 * time.Second
+)
+
+// serverObject is the server a claim names, as much of it as the controllers
+// use.
+type serverObject struct {
+	uid        types.UID
+	generation int64
+	spec       dbv1alpha1.PostgreSQL
+}
+
+// serverKey names a server in the connection cache.
+func serverKey(ns string, ref common.ServerRef) string {
+	if ref.Kind == dbv1alpha1.KindClusterDatabaseServer {
+		ns = ""
+	}
+	return ref.Kind + "/" + ns + "/" + ref.Name
+}
+
+// stamp identifies what a cached pool was built from: the server object (UID
+// and generation) and everything the connection takes from outside it, which
+// the generation does not cover: the credentials, the CA bundle and the proxy.
+// The credentials only go into a hash.
+func stamp(o serverObject, t pgclient.Target, proxy *url.URL) string {
+	h := sha256.New()
+	for _, part := range [][]byte{
+		[]byte(o.uid), []byte(strconv.FormatInt(o.generation, 10)), []byte(t.Host), []byte(strconv.Itoa(int(t.Port))),
+		[]byte(t.Database), []byte(t.User), []byte(t.Password), []byte(t.ServerName), t.CABundle,
+		[]byte(strconv.FormatUint(uint64(t.MinTLS), 10)), []byte(proxyText(proxy)),
+	} {
+		// Length-prefixed, so ("ab","c") and ("a","bc") differ.
+		_, _ = h.Write(strconv.AppendInt(nil, int64(len(part)), 10))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(part)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func proxyText(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	return u.String()
 }
 
 // portOf is the TCP port of a server. The schema admits 1 to 65535 and
@@ -107,17 +168,18 @@ func portOf(p int32) uint16 {
 	return uint16(p)
 }
 
-// serverSpec reads the PostgreSQL fields of the server, which
-// server.Connection does not carry (ADR 0002, open issues).
-func (c Config) serverSpec(ctx context.Context, ns string, ref common.ServerRef) (dbv1alpha1.PostgreSQL, error) {
+// fetchServer reads the PostgreSQL fields of the server, which
+// server.Connection does not carry (ADR 0002, open issues), and its identity
+// for the connection cache.
+func (c Config) fetchServer(ctx context.Context, ns string, ref common.ServerRef) (serverObject, error) {
 	if ref.Kind == dbv1alpha1.KindClusterDatabaseServer {
 		var s dbv1alpha1.ClusterDatabaseServer
 		err := c.Client.Get(ctx, client.ObjectKey{Name: ref.Name}, &s)
-		return s.Spec.PostgreSQL, err
+		return serverObject{s.UID, s.Generation, s.Spec.PostgreSQL}, err
 	}
 	var s dbv1alpha1.DatabaseServer
 	err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &s)
-	return s.Spec.PostgreSQL, err
+	return serverObject{s.UID, s.Generation, s.Spec.PostgreSQL}, err
 }
 
 // claimID is the claim part of the ownership marker.
