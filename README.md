@@ -177,6 +177,8 @@ PostgreSQL servers named by claims, and it sends no telemetry. A server's proxy
 and CA bundle belong to the server object (`spec.proxyURL`, `spec.tls.caBundle`),
 not to the chart.
 
+The CSV therefore declares `features.operators.openshift.io/proxy-aware: "false"`: PostgreSQL egress is per server (`spec.proxyURL`), and the in-cluster Kubernetes API client needs no proxy. `disconnected` is `"true"` and the fips, tls-profiles and token-auth features are `"false"`.
+
 ### OLM
 
 `make bundle` writes the bundle from `config/manifests` (`make bundle-validate`
