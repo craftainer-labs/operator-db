@@ -68,8 +68,8 @@ type backend struct {
 	admin pgclient.Admin
 	// pool is the server's cached admin pool; nil without a cache.
 	pool *pgxpool.Pool
-	spec  dbv1alpha1.PostgreSQL
-	conn  server.Connection
+	spec dbv1alpha1.PostgreSQL
+	conn server.Connection
 }
 
 // backend resolves ref for a claim in ns: the connection settings through
