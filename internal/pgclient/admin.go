@@ -420,19 +420,26 @@ func (a Admin) Retire(ctx context.Context, base, gen string) error {
 }
 
 // DropRole ends the sessions of the roles that exist, hands the objects they
-// own to the admin role and drops them. database may be gone already.
-func (a Admin) DropRole(ctx context.Context, base, database string) error {
+// own to the admin role and drops them. database may be gone already. Like
+// ApplyRole it refuses a role whose marker does not name claim (ErrNotOwned)
+// and drops nothing then, whatever the caller believes it created, so a role
+// the operator did not create is never dropped.
+func (a Admin) DropRole(ctx context.Context, base, claim, database string) error {
 	st, err := a.Role(ctx, base)
 	if err != nil {
 		return err
 	}
 	var idents, literals []string
-	for name, exists := range map[string]bool{
-		base: st.Base.Exists, LoginName(base, GenA): st.A.Exists, LoginName(base, GenB): st.B.Exists,
+	for name, info := range map[string]RoleInfo{
+		base: st.Base, LoginName(base, GenA): st.A, LoginName(base, GenB): st.B,
 	} {
-		if exists {
-			idents, literals = append(idents, Ident(name)), append(literals, Literal(name))
+		if !info.Exists {
+			continue
 		}
+		if info.Marker.Claim != claim {
+			return fmt.Errorf("%w: %q", ErrNotOwned, name)
+		}
+		idents, literals = append(idents, Ident(name)), append(literals, Literal(name))
 	}
 	if len(idents) == 0 {
 		return nil

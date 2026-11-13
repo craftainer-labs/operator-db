@@ -229,7 +229,7 @@ func (e *roleExternal) Update(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec
 
 // Delete implements lifecycle.External: every generation goes with the claim.
 func (e *roleExternal) Delete(ctx context.Context, _ pgclient.RoleState) error {
-	return e.be.admin.DropRole(ctx, e.base, e.database)
+	return e.be.admin.DropRole(ctx, e.base, e.id, e.database)
 }
 
 // RotateBegin implements lifecycle.Rotator: the new generation is the login

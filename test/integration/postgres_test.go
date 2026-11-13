@@ -26,6 +26,9 @@ import (
 	"github.com/craftainer-labs/operator-db/internal/pgclient"
 )
 
+// ownerClaim is the claim of the Owner role in TestRoleOwnershipAndDrop.
+const ownerClaim = "it/owner/uid"
+
 // server is the PostgreSQL under test, from the environment.
 type server struct {
 	host     string
@@ -309,7 +312,7 @@ func TestRoleLifecycle(t *testing.T) {
 	db := newDatabase(t, admin, "it/app/db-uid")
 	base := pgclient.RoleBase("it-"+suffix(), "app")
 	a, b := pgclient.LoginName(base, pgclient.GenA), pgclient.LoginName(base, pgclient.GenB)
-	t.Cleanup(func() { _ = admin.DropRole(ctx, base, db) })
+	t.Cleanup(func() { _ = admin.DropRole(ctx, base, "it/app/role-uid", db) })
 	claim := "it/app/role-uid"
 	params := func(priv, active, password string) pgclient.RoleParams {
 		return pgclient.RoleParams{
@@ -430,6 +433,16 @@ func TestRoleOwnershipAndDrop(t *testing.T) {
 	if st, err := admin.Role(ctx, foreign); err != nil || st.A.Exists || st.B.Exists || st.Marker.Claim != "someone/else/uid" {
 		t.Errorf("the foreign role was changed: %+v, %v", st, err)
 	}
+	// Drop refuses it as well, even when asked for by a claim that thinks it
+	// created the role, and the role survives.
+	for _, claim := range []string{"it/foreign/uid", ""} {
+		if err := admin.DropRole(ctx, foreign, claim, db); !errors.Is(err, pgclient.ErrNotOwned) {
+			t.Errorf("drop of a foreign role by %q: %v", claim, err)
+		}
+	}
+	if st, err := admin.Role(ctx, foreign); err != nil || !st.Base.Exists || st.Marker.Claim != "someone/else/uid" {
+		t.Errorf("the foreign role was dropped: %+v, %v", st, err)
+	}
 
 	// Owner: the login can create objects; Drop ends its sessions, hands what
 	// it owns to the admin and removes all three roles.
@@ -438,17 +451,17 @@ func TestRoleOwnershipAndDrop(t *testing.T) {
 	pw := rand.Text() + rand.Text()
 	err = admin.ApplyRole(ctx, pgclient.RoleParams{
 		Base: base, Database: db, ConnLimit: -1, Password: pw, Privileges: pgclient.Owner,
-		Marker: pgclient.Marker{Claim: "it/owner/uid", Privileges: pgclient.Owner, Active: pgclient.GenA},
+		Marker: pgclient.Marker{Claim: ownerClaim, Privileges: pgclient.Owner, Active: pgclient.GenA},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = admin.DropRole(ctx, base, db) })
+	t.Cleanup(func() { _ = admin.DropRole(ctx, base, ownerClaim, db) })
 	sess := loginSession(t, sv, a, pw, db)
 	if err := sess.Exec(ctx, "CREATE TABLE public.owned_by_role (id int)"); err != nil {
 		t.Fatalf("Owner create table: %v", err)
 	}
-	if err := admin.DropRole(ctx, base, db); err != nil {
+	if err := admin.DropRole(ctx, base, ownerClaim, db); err != nil {
 		t.Fatal(err)
 	}
 	if st, err := admin.Role(ctx, base); err != nil || st.Base.Exists || st.A.Exists || st.B.Exists {
@@ -464,7 +477,7 @@ func TestRoleOwnershipAndDrop(t *testing.T) {
 	})
 
 	// Dropping with the database already gone, and twice, succeeds.
-	if err := admin.DropRole(ctx, base, db+"_gone"); err != nil {
+	if err := admin.DropRole(ctx, base, ownerClaim, db+"_gone"); err != nil {
 		t.Errorf("drop with the database gone: %v", err)
 	}
 }
@@ -500,5 +513,34 @@ func TestConnectionSecurity(t *testing.T) {
 	if c, err := pgx.Connect(ctx, plain); err == nil {
 		_ = c.Close(ctx)
 		t.Error("the server accepted a connection without TLS")
+	}
+}
+
+// The admin pool the controllers keep per server works against the engine over
+// verify-full TLS: it reuses a connection, never holds more than its maximum,
+// and a claim's database is opened outside it.
+func TestAdminPool(t *testing.T) {
+	ctx := context.Background()
+	sv := load(t)
+	tgt := sv.target(sv.user, sv.password, "postgres")
+	pool, err := pgclient.NewPool(tgt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	admin := pgclient.Admin{Open: pgclient.Opener(pool, pgclient.Connect, tgt)}
+
+	for range 5 {
+		if _, err := admin.Database(ctx, "postgres"); err != nil {
+			t.Fatalf("Database through the pool: %v", err)
+		}
+	}
+	// Database("postgres") also opens postgres as a claim database, outside the
+	// pool, so only the admin session was ever pooled.
+	if got := pool.Stat().NewConnsCount(); got != 1 {
+		t.Errorf("%d pooled connections opened for five calls, want 1", got)
+	}
+	if got := pool.Stat().MaxConns(); got != 2 {
+		t.Errorf("MaxConns = %d, want 2", got)
 	}
 }

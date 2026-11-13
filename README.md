@@ -70,18 +70,24 @@ always quoted with `pgx.Identifier`, and extension names must match
   hold only the verifier ([NFR-0004](docs/nfrs/NFR-0004-least-privilege-and-no-credentials-in-output.md)).
   Retiring a login (`NOLOGIN`, password cleared) also ends its open sessions
   with `pg_terminate_backend`.
-- The admin connections of a server are reused between reconciles: one pool
-  per server (at most two idle admin-database sessions, 30 seconds each, none
-  for a claim's database, which `DROP DATABASE ... WITH (FORCE)` would kill).
-  The pool is keyed on the server's UID and generation and a hash of the
-  resolved connection (host, port, credentials, CA, TLS settings, proxy), so a
-  rotated admin Secret or CA replaces it, and it is dropped when the server is
-  gone or unused for ten minutes.
+- The admin connections of a server are reused between reconciles: one
+  `pgxpool` per server (at most two connections, idle ones closed after 30
+  seconds, health-checked every 30 seconds, a broken one discarded when it is
+  released), only for the admin database; a claim's database is opened and
+  closed per use, because `DROP DATABASE ... WITH (FORCE)` would kill a pooled
+  session. The pool is keyed on the server's UID and generation and a hash of
+  the resolved connection (host, port, credentials, CA, TLS settings, proxy), so
+  a rotated admin Secret or CA replaces it (the old pool is closed in the
+  background), and it is dropped when the server is gone or unused for ten
+  minutes.
 - A `DatabaseRole` is reconciled again when the `Database` it names changes (a
   watch through a field index), so a role waiting for its `Database` goes on as
   soon as the `Database` has its name.
-- Known limits: a failed statement or an idle session the server closed costs
-  one failed reconcile before the pool opens a new connection; objects an
+- Deleting a `DatabaseRole` checks the ownership marker of its roles again
+  before dropping them, so a role the claim did not create is refused
+  (`ErrNotOwned`) whatever the caller believes.
+- Known limits: a session the server closed costs one failed reconcile before
+  the pool opens a new connection; objects an
   `Owner` role creates later are covered only at the next privilege change (see
   above).
 - Server health probing (`ClusterDatabaseServer` and `DatabaseServer` status) is

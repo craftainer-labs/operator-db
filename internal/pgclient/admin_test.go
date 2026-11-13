@@ -420,7 +420,7 @@ func TestConnectionErrorsAreCoarse(t *testing.T) {
 func TestDropRole(t *testing.T) {
 	ctx := context.Background()
 	f := &fakePG{rows: roleRows("r", true)}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil {
+	if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); err != nil {
 		t.Fatal(err)
 	}
 	f.want(t,
@@ -429,22 +429,36 @@ func TestDropRole(t *testing.T) {
 		`db|DROP OWNED BY "r", "r_a", "r_b"`,
 		`|DROP ROLE IF EXISTS "r", "r_a", "r_b"`)
 
+	// A role of another claim, or without a marker, is refused and nothing is
+	// dropped, whichever of the three it is.
+	for _, foreign := range []string{"someone/else/uid", ""} {
+		f = &fakePG{rows: roleRows("r", true)}
+		f.rows[0].rows[1]["comment"] = markerPrefix + foreign
+		if foreign == "" {
+			f.rows[0].rows[1]["comment"] = ""
+		}
+		err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db")
+		if !errors.Is(err, ErrNotOwned) || strings.Contains(f.joined(), "DROP") || strings.Contains(f.joined(), "terminate") {
+			t.Errorf("foreign %q: %v, %v", foreign, err, f.stmts)
+		}
+	}
+
 	// Nothing left to drop.
 	f = &fakePG{}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil || len(f.stmts) != 1 {
+	if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); err != nil || len(f.stmts) != 1 {
 		t.Errorf("empty drop: %v, %v", err, f.stmts)
 	}
 
 	// The database is gone: its owned objects went with it.
 	f = &fakePG{rows: roleRows("r", true), openErr: map[string]error{"db": &pgconn.PgError{Code: "3D000"}}}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil {
+	if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); err != nil {
 		t.Fatal(err)
 	}
 	f.want(t, `DROP ROLE IF EXISTS`)
 
 	for _, fail := range []string{"pg_roles", "pg_terminate_backend", "REASSIGN OWNED", "DROP ROLE"} {
 		f = &fakePG{rows: roleRows("r", true), failOn: fail}
-		if err := f.admin().DropRole(ctx, "r", "db"); !errors.Is(err, errBoom) {
+		if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); !errors.Is(err, errBoom) {
 			t.Errorf("failOn %q: %v", fail, err)
 		}
 	}

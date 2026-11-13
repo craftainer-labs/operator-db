@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,7 +38,7 @@ const (
 var ErrAdminCredentials = errors.New("the admin Secret needs the keys username and password")
 
 // ConnectFunc opens a PostgreSQL session; production uses pgclient.Connect.
-type ConnectFunc func(ctx context.Context, t pgclient.Target) (pgclient.Session, error)
+type ConnectFunc = pgclient.Connector
 
 // Config is what both reconcilers share.
 type Config struct {
@@ -65,6 +66,8 @@ type Config struct {
 // backend is a resolved server.
 type backend struct {
 	admin pgclient.Admin
+	// pool is the server's cached admin pool; nil without a cache.
+	pool *pgxpool.Pool
 	spec  dbv1alpha1.PostgreSQL
 	conn  server.Connection
 }
@@ -99,22 +102,19 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 		Host: spec.Host, Port: portOf(spec.Port), Database: spec.AdminDatabase, User: string(user), Password: string(pass),
 		ServerName: conn.ServerName, CABundle: conn.CABundle, MinTLS: conn.MinTLSVersion, Dial: dial,
 	}
-	maxIdle := 0 // without a cache nobody would close an idle session
+	// Without a cache nobody would close a pool, so every session is opened
+	// (and closed) on its own.
+	var pool *pgxpool.Pool
 	if c.Cache != nil {
-		maxIdle = serverMaxIdle
+		pool, err = c.Cache.Get(cacheKey, stamp(obj, target, conn.Proxy), func() (*pgxpool.Pool, error) {
+			return pgclient.NewPool(target)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, err)
+		}
 	}
-	pool := c.Cache.Get(cacheKey, stamp(obj, target, conn.Proxy), func() *pgclient.Pool {
-		return pgclient.NewPool(c.Connect, target, maxIdle, serverSessionTTL)
-	})
-	return &backend{admin: pgclient.Admin{Open: pool.Open}, spec: spec, conn: conn}, nil
+	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, spec: spec, conn: conn}, nil
 }
-
-// serverMaxIdle and serverSessionTTL bound the idle admin sessions of a
-// server: a few, for a short time, so a restarted server costs one retry.
-const (
-	serverMaxIdle    = 2
-	serverSessionTTL = 30 * time.Second
-)
 
 // serverObject is the server a claim names, as much of it as the controllers
 // use.
