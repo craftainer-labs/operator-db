@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -489,6 +490,36 @@ func TestRoleOwnershipAndDrop(t *testing.T) {
 	// Dropping with the database already gone, and twice, succeeds.
 	if err := admin.DropRole(ctx, base, ownerClaim, db+"_gone"); err != nil {
 		t.Errorf("drop with the database gone: %v", err)
+	}
+
+	// A set of which one login was taken over by another claim: DropRole
+	// refuses it, DropOwnRoles drops the roles that are ours and leaves that login.
+	mixed := pgclient.RoleBase("it-"+suffix(), "mixed")
+	mixedClaim := "it/mixed/uid"
+	err = admin.ApplyRole(ctx, pgclient.RoleParams{
+		Base: mixed, Database: db, ConnLimit: -1, Password: rand.Text() + rand.Text(), Privileges: pgclient.ReadOnly,
+		Marker: pgclient.Marker{Claim: mixedClaim, Privileges: pgclient.ReadOnly, Active: pgclient.GenA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginB := pgclient.LoginName(mixed, pgclient.GenB)
+	t.Cleanup(func() {
+		_ = admin.DropRole(ctx, mixed, mixedClaim, db)
+		_ = root.Exec(ctx, "DROP ROLE IF EXISTS "+pgclient.Ident(loginB))
+	})
+	if err := root.Exec(ctx, "COMMENT ON ROLE "+pgclient.Ident(loginB)+" IS 'craftainer.dev/claim=someone/else/uid'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.DropRole(ctx, mixed, mixedClaim, db); !errors.Is(err, pgclient.ErrNotOwned) {
+		t.Errorf("DropRole of a mixed set: %v", err)
+	}
+	skipped, err := admin.DropOwnRoles(ctx, mixed, mixedClaim, db)
+	if err != nil || !slices.Equal(skipped, []string{loginB}) {
+		t.Errorf("DropOwnRoles of a mixed set: skipped %v, %v", skipped, err)
+	}
+	if st, err := admin.Role(ctx, mixed); err != nil || st.Base.Exists || st.A.Exists || !st.B.Exists || st.Marker.Claim != "" || st.B.Marker.Claim != "someone/else/uid" {
+		t.Errorf("after DropOwnRoles: %+v, %v", st, err)
 	}
 }
 

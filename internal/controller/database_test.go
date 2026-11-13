@@ -151,18 +151,33 @@ func TestDatabaseOnAnUnreachableServer(t *testing.T) {
 	}
 	h.get(db)
 	h.wantCondition(db.Status.Conditions, conditions.ServerReachable, metav1.ConditionFalse, conditions.ServerUnreachable)
+	// The claim never issued a create, so deleting it needs no server.
 	h.must(env.Client.Delete(context.Background(), db))
-	if err := h.reconcile(r, db); err == nil {
-		t.Error("the delete went through an unreachable server")
-	}
-	if h.gone(db) {
-		t.Error("the finalizer was dropped")
-	}
-
-	// Back up: the claim is created and deleted.
-	h.fake.connErr = nil
+	h.fake.reset()
 	h.reconcileOK(r, db)
 	if !h.gone(db) {
+		t.Error("the claim is still there")
+	}
+	if h.fake.joined() != "" {
+		t.Errorf("the server was contacted:\n%s", h.fake.joined())
+	}
+
+	// A claim that issued a create does need it: the finalizer stays until the
+	// server is back.
+	h.fake.connErr = nil
+	db2 := h.database("down-after-create", nil)
+	h.reconcileOK(r, db2)
+	h.fake.connErr = errUnreachable
+	h.must(env.Client.Delete(context.Background(), db2))
+	if err := h.reconcile(r, db2); err == nil {
+		t.Error("the delete went through an unreachable server")
+	}
+	if h.gone(db2) {
+		t.Error("the finalizer was dropped")
+	}
+	h.fake.connErr = nil
+	h.reconcileOK(r, db2)
+	if !h.gone(db2) {
 		t.Error("the claim is still there")
 	}
 }

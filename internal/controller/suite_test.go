@@ -67,6 +67,8 @@ type pgFake struct {
 	connErr error
 	// failOn makes the statements that contain it fail.
 	failOn string
+	// failErr is what a statement that failOn fails with, errStatement when nil.
+	failErr error
 	// queryFailOn makes the queries that contain it return queryErr.
 	queryFailOn string
 	queryErr    error
@@ -127,6 +129,9 @@ func (s *pgSession) Exec(_ context.Context, sql string) error {
 	defer s.f.mu.Unlock()
 	s.f.stmts = append(s.f.stmts, s.db+"|"+sql)
 	if s.f.failOn != "" && strings.Contains(sql, s.f.failOn) {
+		if s.f.failErr != nil {
+			return s.f.failErr
+		}
 		return errStatement
 	}
 	return nil

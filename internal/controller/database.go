@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -15,6 +16,10 @@ import (
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
 	"github.com/craftainer-labs/operator-db/internal/pgclient"
 )
+
+// sqlStateDuplicateDatabase is SQLSTATE 42P04, the answer of CREATE DATABASE to
+// a name that is taken.
+const sqlStateDuplicateDatabase = "42P04"
 
 // ErrExtensionNotAllowed means a Database asks for an extension its server's
 // allowedExtensions does not list.
@@ -42,12 +47,14 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Client.Get(ctx, req.NamespacedName, &db); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	be, err := r.backend(ctx, db.Namespace, db.Spec.ServerRef)
-	opts := lifecycle.Options{
-		Class: lifecycle.ClassData, ManagedBy: r.ManagedBy, Recorder: r.Recorder, APIReader: r.APIReader,
-		DefaultDeletionPolicy: r.DefaultDeletionPolicy, ResolveErr: err,
-		Now: r.Now,
+	// A claim that is being deleted and never issued a create has nothing on the
+	// server: it is released without contacting the server, which may be gone.
+	if !db.DeletionTimestamp.IsZero() && db.GetExternalID() == "" {
+		return lifecycle.Reconcile[dbv1alpha1.DatabaseSpec, pgclient.DatabaseState](ctx, r.Client, &db, db.Spec,
+			nothingMade[dbv1alpha1.DatabaseSpec, pgclient.DatabaseState]{}, r.options(nil))
 	}
+	be, err := r.backend(ctx, db.Namespace, db.Spec.ServerRef)
+	opts := r.options(err)
 	var ext lifecycle.External[dbv1alpha1.DatabaseSpec, pgclient.DatabaseState]
 	if err == nil {
 		opts.ServerHost = be.spec.Host
@@ -56,6 +63,15 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		ext = x
 	}
 	return lifecycle.Reconcile(ctx, r.Client, &db, db.Spec, ext, opts)
+}
+
+// options are the lifecycle options of the controller; resolveErr is the error
+// of resolving the server, or nil.
+func (r *DatabaseReconciler) options(resolveErr error) lifecycle.Options {
+	return lifecycle.Options{
+		Class: lifecycle.ClassData, ManagedBy: r.ManagedBy, Recorder: r.Recorder, APIReader: r.APIReader,
+		DefaultDeletionPolicy: r.DefaultDeletionPolicy, ResolveErr: resolveErr, Now: r.Now,
+	}
 }
 
 // SetupWithManager registers the controller.
@@ -115,6 +131,10 @@ func (e *databaseExternal) params(spec dbv1alpha1.DatabaseSpec) pgclient.Databas
 // claim is refused. One with no marker is taken over by Update only when the
 // claim's status records that it issued the create (a Create that stopped
 // before it stamped the marker); otherwise it is refused as unmanaged.
+//
+// While the claim is being deleted a database that is not its own is not
+// refused but left out (it does not exist as far as the claim is concerned), so
+// the claim is released and the database is never dropped.
 func (e *databaseExternal) Observe(ctx context.Context, spec dbv1alpha1.DatabaseSpec) (lifecycle.Observation[pgclient.DatabaseState], error) {
 	e.claim.SetExternalName(e.name) // see roleExternal.Observe
 	st, err := e.be.admin.Database(ctx, e.name)
@@ -122,16 +142,31 @@ func (e *databaseExternal) Observe(ctx context.Context, spec dbv1alpha1.Database
 		return lifecycle.Observation[pgclient.DatabaseState]{}, err
 	}
 	if st.Marker.Claim != "" && st.Marker.Claim != e.marker.Claim {
-		return lifecycle.Observation[pgclient.DatabaseState]{},
-			fmt.Errorf("%w: database %q belongs to another claim", lifecycle.ErrNameCollision, e.name)
+		return lifecycle.Observation[pgclient.DatabaseState]{}, e.foreign(
+			fmt.Errorf("%w: database %q belongs to another claim", lifecycle.ErrNameCollision, e.name))
 	}
 	if st.Marker.Claim == "" && e.claim.GetExternalID() != createIssued {
-		return lifecycle.Observation[pgclient.DatabaseState]{},
-			fmt.Errorf("%w: %w: %q", lifecycle.ErrNameCollision, ErrExistsUnmanaged, e.name)
+		return lifecycle.Observation[pgclient.DatabaseState]{}, e.foreign(
+			fmt.Errorf("%w: %w: %q", lifecycle.ErrNameCollision, ErrExistsUnmanaged, e.name))
+	}
+	// A claim from before the create was recorded: the marker is the proof that
+	// the database is ours, so the record is made now (written with the status).
+	if st.Marker.Claim == e.marker.Claim && e.claim.GetExternalID() == "" {
+		e.claim.SetExternalID(createIssued)
 	}
 	missing := slices.ContainsFunc(spec.Extensions, func(x string) bool { return !slices.Contains(st.Extensions, x) })
 	upToDate := st.Marker.Claim == e.marker.Claim && st.ConnLimit == connLimit(spec.ConnectionLimit) && !missing
 	return lifecycle.Observation[pgclient.DatabaseState]{Exists: true, UpToDate: upToDate, Current: st}, nil
+}
+
+// foreign says what to do with a refusal of a database that is not this claim's:
+// a claim that is being deleted leaves the database alone and goes on (nil), any
+// other keeps the refusal.
+func (e *databaseExternal) foreign(refusal error) error {
+	if e.claim.DeletionTimestamp.IsZero() {
+		return refusal
+	}
+	return nil
 }
 
 // Create implements lifecycle.External; a data kind has no binding data.
@@ -144,7 +179,17 @@ func (e *databaseExternal) Create(ctx context.Context, spec dbv1alpha1.DatabaseS
 	if err := e.persist(ctx); err != nil {
 		return nil, err
 	}
-	return nil, e.be.admin.CreateDatabase(ctx, e.params(spec))
+	err := e.be.admin.CreateDatabase(ctx, e.params(spec))
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != sqlStateDuplicateDatabase {
+		return nil, err
+	}
+	// Somebody made a database of the name between Observe and the create. CREATE
+	// DATABASE is atomic, so nothing of this claim is on the server: the record
+	// is withdrawn, or a later delete would take the database for ours (it has
+	// no marker) and drop it.
+	e.claim.SetExternalID("")
+	return nil, errors.Join(err, e.persist(ctx))
 }
 
 // Update implements lifecycle.External. It never drops an extension.

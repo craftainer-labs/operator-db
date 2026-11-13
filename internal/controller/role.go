@@ -40,16 +40,20 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.Client.Get(ctx, req.NamespacedName, &role); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	be, err := r.backend(ctx, role.Namespace, role.Spec.ServerRef)
-	opts := lifecycle.Options{
-		Class: lifecycle.ClassCredential, BindingType: binding.TypePostgreSQL, Provider: binding.DefaultProvider,
-		ManagedBy: r.ManagedBy, Recorder: r.Recorder, APIReader: r.APIReader, ResolveErr: err,
-		Now: r.Now,
+	// A claim that is being deleted and never issued a create has nothing on the
+	// server (roles of its name, if there are any, are not its own): it is
+	// released without contacting the server, which may be gone.
+	if !role.DeletionTimestamp.IsZero() && role.GetExternalID() == "" {
+		return lifecycle.Reconcile[dbv1alpha1.DatabaseRoleSpec, pgclient.RoleState](ctx, r.Client, &role, role.Spec,
+			nothingMade[dbv1alpha1.DatabaseRoleSpec, pgclient.RoleState]{}, r.options(nil))
 	}
+	be, err := r.backend(ctx, role.Namespace, role.Spec.ServerRef)
+	opts := r.options(err)
 	var ext lifecycle.External[dbv1alpha1.DatabaseRoleSpec, pgclient.RoleState]
 	if err == nil {
 		opts.ServerHost = be.spec.Host
 		x := newRoleExternal(be, &role)
+		x.persist = func(ctx context.Context) error { return r.Client.Status().Update(ctx, &role) }
 		// The database is the one the Database claim names in its status, not
 		// one derived again here. Deleting a role does not need the Database
 		// (it may be gone first), so a failure only counts when not deleting.
@@ -63,6 +67,15 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		ext = x
 	}
 	return lifecycle.Reconcile(ctx, r.Client, &role, role.Spec, ext, opts)
+}
+
+// options are the lifecycle options of the controller; resolveErr is the error
+// of resolving the server, or nil.
+func (r *RoleReconciler) options(resolveErr error) lifecycle.Options {
+	return lifecycle.Options{
+		Class: lifecycle.ClassCredential, BindingType: binding.TypePostgreSQL, Provider: binding.DefaultProvider,
+		ManagedBy: r.ManagedBy, Recorder: r.Recorder, APIReader: r.APIReader, ResolveErr: resolveErr, Now: r.Now,
+	}
 }
 
 // checkDatabase makes sure the Database exists in the claim's namespace on the
@@ -139,6 +152,9 @@ type roleExternal struct {
 	// pre is a precondition failure (the Database is not usable). Observe
 	// reports it, and Reconcile calls nothing else when Observe fails.
 	pre error
+	// persist writes the claim's status now, instead of at the end of the
+	// reconcile.
+	persist func(context.Context) error
 }
 
 func newRoleExternal(be *backend, claim *dbv1alpha1.DatabaseRole) *roleExternal {
@@ -168,9 +184,25 @@ func activeOf(m pgclient.Marker) string {
 	return m.Active
 }
 
+// foreign says what to do with a refusal of a role that is not this claim's: a
+// claim that is being deleted leaves the roles alone and goes on (nil), any other
+// keeps the refusal.
+func (e *roleExternal) foreign(refusal error) error {
+	if e.claim.DeletionTimestamp.IsZero() {
+		return refusal
+	}
+	return nil
+}
+
 // Observe implements lifecycle.External. The role is up to date when its owner
 // role cannot log in, both logins exist with the wanted connection limit, the
 // active one can log in, and the marker names this claim and its privileges.
+//
+// While the claim is being deleted, a role that is not its own (any of the
+// three) is not refused but left out: Delete drops the roles that are its own
+// and skips the others (DropOwnRoles), and a set with none of its own is
+// released without a drop. A login of ours is dropped even when the owner role
+// next to it is foreign, because it would be a live credential left behind.
 func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec) (lifecycle.Observation[pgclient.RoleState], error) {
 	none := lifecycle.Observation[pgclient.RoleState]{}
 	// Reconcile adds the finalizer with a patch that replaces the claim with
@@ -185,17 +217,34 @@ func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpe
 	}
 	// A role is created together with its marker, so one that exists without
 	// ours is not ours, whichever of the three it is.
+	ours := false
 	for _, r := range []struct {
 		name string
 		info pgclient.RoleInfo
 	}{{e.base, st.Base}, {pgclient.LoginName(e.base, pgclient.GenA), st.A}, {pgclient.LoginName(e.base, pgclient.GenB), st.B}} {
-		if r.info.Exists && r.info.Marker.Claim != e.id {
-			return none, fmt.Errorf("%w: role %q belongs to another claim or is not managed by this operator",
-				lifecycle.ErrNameCollision, r.name)
+		if !r.info.Exists {
+			continue
 		}
+		if r.info.Marker.Claim != e.id {
+			if err := e.foreign(fmt.Errorf("%w: role %q belongs to another claim or is not managed by this operator",
+				lifecycle.ErrNameCollision, r.name)); err != nil {
+				return none, err
+			}
+			continue
+		}
+		ours = true
+	}
+	if !e.claim.DeletionTimestamp.IsZero() {
+		// Only what is ours is dropped (Delete); none of it means nothing to do.
+		return lifecycle.Observation[pgclient.RoleState]{Exists: ours, Current: st}, nil
 	}
 	if !st.Base.Exists {
 		return none, nil
+	}
+	// A claim from before the create was recorded: the marker is the proof that
+	// the roles are ours, so the record is made now (written with the status).
+	if st.Marker.Claim == e.id && e.claim.GetExternalID() == "" {
+		e.claim.SetExternalID(createIssued)
 	}
 	upToDate := st.Marker.Claim == e.id && st.Marker.Privileges == e.privileges && !st.Base.Login &&
 		st.A.Exists && st.B.Exists && st.A.ConnLimit == e.limit && st.B.ConnLimit == e.limit &&
@@ -219,8 +268,25 @@ func (e *roleExternal) issue(ctx context.Context, active string) (binding.Data, 
 }
 
 // Create implements lifecycle.External: login a is the first generation.
+//
+// The create is recorded in status.externalId before the first statement, so a
+// crash after it is recognised; a claim deleted without the record is released
+// without the server being contacted.
 func (e *roleExternal) Create(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec) (binding.Data, error) {
-	return e.issue(ctx, pgclient.GenA)
+	e.claim.SetExternalID(createIssued)
+	if err := e.persist(ctx); err != nil {
+		return nil, err
+	}
+	data, err := e.issue(ctx, pgclient.GenA)
+	if !errors.Is(err, pgclient.ErrNotOwned) {
+		return data, err
+	}
+	// Somebody made a role of the name between Observe and the create. Nothing
+	// of this claim is on the server (ApplyRole creates nothing for a role it
+	// refuses), so the record is withdrawn and the claim is released on deletion
+	// without contacting it.
+	e.claim.SetExternalID("")
+	return nil, errors.Join(err, e.persist(ctx))
 }
 
 // Update implements lifecycle.External. It re-issues the active login's
@@ -229,9 +295,14 @@ func (e *roleExternal) Update(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec
 	return e.issue(ctx, activeOf(cur.Marker))
 }
 
-// Delete implements lifecycle.External: every generation goes with the claim.
+// Delete implements lifecycle.External: every generation that is the claim's
+// goes with it; a role of the set that is not is skipped.
 func (e *roleExternal) Delete(ctx context.Context, _ pgclient.RoleState) error {
-	return e.be.admin.DropRole(ctx, e.base, e.id, e.database)
+	skipped, err := e.be.admin.DropOwnRoles(ctx, e.base, e.id, e.database)
+	if len(skipped) > 0 {
+		log.FromContext(ctx).Info("roles that are not this claim's were left alone", "roles", skipped)
+	}
+	return err
 }
 
 // RotateBegin implements lifecycle.Rotator: the new generation is the login
