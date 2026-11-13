@@ -47,6 +47,22 @@ func env(t *testing.T, key, fallback string) string {
 	return fallback
 }
 
+// readFile reads a file named by the test environment through an os.Root on
+// its directory, so the read cannot leave that directory.
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	dir, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	b, err := dir.ReadFile(filepath.Base(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // load reads the connection settings. A missing one fails the test: running
 // the tag without a server is a mistake, not a reason to skip.
 func load(t *testing.T) server {
@@ -59,17 +75,10 @@ func load(t *testing.T) server {
 	if caFile == "" {
 		t.Fatal("PG_CA_FILE is not set; see test/integration/README.md")
 	}
-	ca, err := os.ReadFile(filepath.Clean(caFile))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ca := readFile(t, caFile)
 	password := os.Getenv("PG_ADMIN_PASSWORD")
 	if file := os.Getenv("PG_ADMIN_PASSWORD_FILE"); password == "" && file != "" {
-		b, err := os.ReadFile(filepath.Clean(file))
-		if err != nil {
-			t.Fatal(err)
-		}
-		password = strings.TrimSpace(string(b))
+		password = strings.TrimSpace(string(readFile(t, file)))
 	}
 	if password == "" {
 		t.Fatal("PG_ADMIN_PASSWORD or PG_ADMIN_PASSWORD_FILE is not set; see test/integration/README.md")
