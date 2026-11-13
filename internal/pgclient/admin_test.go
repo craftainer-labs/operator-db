@@ -405,3 +405,36 @@ func TestConnectionErrorsAreCoarse(t *testing.T) {
 		}
 	}
 }
+
+func TestDropRole(t *testing.T) {
+	ctx := context.Background()
+	f := &fakePG{rows: roleRows("r", true)}
+	if err := f.admin().DropRole(ctx, "r", "db"); err != nil {
+		t.Fatal(err)
+	}
+	f.want(t,
+		`pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('r', 'r_a', 'r_b')`,
+		`db|REASSIGN OWNED BY "r", "r_a", "r_b" TO CURRENT_USER`,
+		`db|DROP OWNED BY "r", "r_a", "r_b"`,
+		`|DROP ROLE IF EXISTS "r", "r_a", "r_b"`)
+
+	// Nothing left to drop.
+	f = &fakePG{}
+	if err := f.admin().DropRole(ctx, "r", "db"); err != nil || len(f.stmts) != 1 {
+		t.Errorf("empty drop: %v, %v", err, f.stmts)
+	}
+
+	// The database is gone: its owned objects went with it.
+	f = &fakePG{rows: roleRows("r", true), openErr: map[string]error{"db": &pgconn.PgError{Code: "3D000"}}}
+	if err := f.admin().DropRole(ctx, "r", "db"); err != nil {
+		t.Fatal(err)
+	}
+	f.want(t, `DROP ROLE IF EXISTS`)
+
+	for _, fail := range []string{"pg_roles", "pg_terminate_backend", "REASSIGN OWNED", "DROP ROLE"} {
+		f = &fakePG{rows: roleRows("r", true), failOn: fail}
+		if err := f.admin().DropRole(ctx, "r", "db"); !errors.Is(err, errBoom) {
+			t.Errorf("failOn %q: %v", fail, err)
+		}
+	}
+}

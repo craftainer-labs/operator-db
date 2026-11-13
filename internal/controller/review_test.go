@@ -229,3 +229,14 @@ func TestUnreachableServerShowsOnlyACategory(t *testing.T) {
 		}
 	}
 }
+
+// A server that cannot be asked about the role is an unreachable server.
+func TestRoleOnAnUnreachableServer(t *testing.T) {
+	h := newHarness(t, common.DeletionRetain, nil)
+	h.reconcileOK(&DatabaseReconciler{h.cfg}, h.database("orders", nil))
+	role := h.role("down", "orders", nil)
+	h.fake.connErr = errUnreachable
+	if err := h.reconcile(&RoleReconciler{h.cfg}, role); !errors.Is(err, lifecycle.ErrUnreachable) {
+		t.Errorf("reconcile: %v", err)
+	}
+}
