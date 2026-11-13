@@ -20,6 +20,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -230,8 +231,11 @@ func (s *settings) managerOptions(opts []Option) ctrl.Options {
 		// Lease on cancel is safe and makes a rollout faster.
 		LeaderElectionReleaseOnCancel: true,
 		// The Secret cache holds only the binding Secrets the operator owns
-		// (EB-2); the admin Secrets and CA bundles of servers are read live.
-		Cache: cache.Options{ByObject: binding.CacheByObject(EventRecorderName)},
+		// (EB-2), and the ConfigMap cache (the probes' watches) only the
+		// ConfigMaps with the same label, so the operator never lists or
+		// watches the cluster's other ones; the admin Secrets and CA bundles of
+		// servers are read live.
+		Cache: cache.Options{ByObject: cacheByObject()},
 		Client: client.Options{Cache: &client.CacheOptions{
 			DisableFor: []client.Object{&corev1.Secret{}, &corev1.ConfigMap{}},
 		}},
@@ -329,11 +333,21 @@ func setup(mgr ctrl.Manager, webhooks bool, cs controllerSettings) error {
 	return runSteps(mgr, steps)
 }
 
+// cacheByObject restricts the Secret and the ConfigMap cache to the objects
+// that carry the operator's managed-by label.
+func cacheByObject() map[client.Object]cache.ByObject {
+	byObject := binding.CacheByObject(EventRecorderName)
+	byObject[&corev1.ConfigMap{}] = cache.ByObject{
+		Label: labels.SelectorFromSet(labels.Set{binding.LabelManagedBy: EventRecorderName}),
+	}
+	return byObject
+}
+
 // serverProbe returns the setup of the probe.Reconciler of one server kind,
 // which writes the kind's status (serverVersion, lastProbeTime, Ready and
 // ServerReachable) from a PostgreSQL probe. Its Client reads Secrets and
 // ConfigMaps live (managerOptions), and its watches on them go through the
-// manager's cache.
+// manager's caches, which hold only the managed-by labelled ones.
 func serverProbe(mgr ctrl.Manager, cfg controller.Config, operatorNS string, kind func() probe.Server) func(ctrl.Manager) error {
 	return (&probe.Reconciler{
 		Client: mgr.GetClient(), New: kind, Prober: controller.Prober{Config: cfg},

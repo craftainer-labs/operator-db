@@ -154,14 +154,14 @@ wired in `internal/app`:
   for the probe and closes it. Credentials are never in an error or a log.
 - RBAC: `get`, `list` and `watch` on Secrets and ConfigMaps, and `get`, `patch`
   on the servers' `status`, in the chart role.
-- Caches: the manager's Secret cache keeps only the `managed-by` binding Secrets
-  (so the operator does not hold every Secret in memory), and the probe reads the
-  admin Secret and the CA bundle live, not from the cache, so every probe sees the
-  current object. A change to an unlabelled admin or CA Secret does not trigger a
-  probe at once; it is picked up at the next probe interval (one minute by
-  default). ConfigMaps are cached unfiltered, so a CA ConfigMap change probes at
-  once. Do not widen the Secret cache to every Secret for that: it costs memory
-  and widens exposure for a latency gain of at most one interval.
+- Caches: the manager's Secret and ConfigMap caches keep only the objects with
+  the `managed-by` label (so the operator does not hold every Secret or ConfigMap
+  in memory), and the probe reads the admin Secret and the CA bundle live, not
+  from the cache, so every probe sees the current object. A change to an
+  unlabelled admin Secret, CA Secret or CA ConfigMap does not trigger a probe at
+  once; it is picked up at the next probe interval (one minute by default). Do
+  not widen either cache for that: it costs memory and widens exposure for a
+  latency gain of at most one interval.
 
 Configuration, as flags with environment defaults:
 

@@ -16,8 +16,9 @@ package app
 // Secrets are written; the manager's cache of Secrets is restricted to its
 // managed-by label (binding.CacheByObject), and reads of unlabelled Secrets go
 // to the API server. The server probes (probe.Reconciler) also watch Secrets
-// and ConfigMaps, so those need list and watch too. ConfigMaps: CA bundles
-// only. Events: the Event recorder.
+// and ConfigMaps, so those need list and watch too (the ConfigMap cache is
+// restricted to the managed-by label like the Secret cache). ConfigMaps: CA
+// bundles only. Events: the Event recorder.
 
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
