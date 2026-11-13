@@ -15,7 +15,7 @@ import (
 func target(t *testing.T, fs *fakeServer, ca []byte) Target {
 	t.Helper()
 	host, port, _ := net.SplitHostPort(fs.addr)
-	p, _ := strconv.Atoi(port)
+	p, _ := strconv.ParseUint(port, 10, 16)
 	open, _ := egress.Policy{}.Dialer(nil)
 	return Target{Host: host, Port: uint16(p), Database: "postgres", User: "admin", Password: "pw", CABundle: ca, MinTLS: tls.VersionTLS13, Dial: open}
 }

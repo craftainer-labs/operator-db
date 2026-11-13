@@ -55,6 +55,7 @@ func (r *DatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // databaseExternal is the lifecycle.External of one Database.
 type databaseExternal struct {
 	be     *backend
+	claim  *dbv1alpha1.Database
 	name   string
 	marker pgclient.Marker
 }
@@ -67,7 +68,7 @@ func newDatabaseExternal(be *backend, claim *dbv1alpha1.Database) *databaseExter
 		name = pgclient.DatabaseName(claim.Namespace, claim.Name)
 		claim.SetExternalName(name)
 	}
-	return &databaseExternal{be: be, name: name, marker: pgclient.Marker{Claim: claimID(claim)}}
+	return &databaseExternal{be: be, claim: claim, name: name, marker: pgclient.Marker{Claim: claimID(claim)}}
 }
 
 // checkExtensions, run before Create and Update (never before Delete, which
@@ -96,6 +97,7 @@ func (e *databaseExternal) params(spec dbv1alpha1.DatabaseSpec) pgclient.Databas
 // claim is refused; one with no marker is a Create that stopped before it
 // stamped the marker, and is taken over by Update.
 func (e *databaseExternal) Observe(ctx context.Context, spec dbv1alpha1.DatabaseSpec) (lifecycle.Observation[pgclient.DatabaseState], error) {
+	e.claim.SetExternalName(e.name) // see roleExternal.Observe
 	st, err := e.be.admin.Database(ctx, e.name)
 	if err != nil || !st.Exists {
 		return lifecycle.Observation[pgclient.DatabaseState]{}, err

@@ -85,6 +85,7 @@ func (r *RoleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // section 8): a NOLOGIN owner role and two logins, a and b.
 type roleExternal struct {
 	be         *backend
+	claim      *dbv1alpha1.DatabaseRole
 	base       string
 	database   string
 	id         string
@@ -106,7 +107,7 @@ func newRoleExternal(be *backend, claim *dbv1alpha1.DatabaseRole) *roleExternal 
 		priv = pgclient.ReadWrite
 	}
 	return &roleExternal{
-		be: be, base: base, database: pgclient.DatabaseName(claim.Namespace, claim.Spec.DatabaseRef.Name),
+		be: be, claim: claim, base: base, database: pgclient.DatabaseName(claim.Namespace, claim.Spec.DatabaseRef.Name),
 		id: claimID(claim), privileges: priv, limit: connLimit(claim.Spec.ConnectionLimit),
 	}
 }
@@ -127,6 +128,9 @@ func activeOf(m pgclient.Marker) string {
 // active one can log in, and the marker names this claim and its privileges.
 func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec) (lifecycle.Observation[pgclient.RoleState], error) {
 	none := lifecycle.Observation[pgclient.RoleState]{}
+	// Reconcile adds the finalizer with a patch that replaces the claim with
+	// the server's copy, which loses a name set before it; set it again here.
+	e.claim.SetExternalName(e.base)
 	if e.pre != nil {
 		return none, e.pre
 	}
