@@ -30,9 +30,11 @@ type SSLMode string
 const (
 	// SSLModeVerifyFull verifies the certificate chain and the host name.
 	SSLModeVerifyFull SSLMode = "verify-full"
-	// SSLModeVerifyCA verifies the certificate chain only.
+	// SSLModeVerifyCA is verified as verify-full: the operator never skips
+	// the host name check.
 	SSLModeVerifyCA SSLMode = "verify-ca"
-	// SSLModeRequire encrypts the connection without verifying the server.
+	// SSLModeRequire is verified as verify-full: the operator never skips
+	// certificate verification.
 	SSLModeRequire SSLMode = "require"
 )
 
@@ -58,7 +60,9 @@ type PostgreSQL struct {
 	AdminDatabase string `json:"adminDatabase,omitempty"`
 
 	// sslMode is the libpq sslmode. verify-full, verify-ca and require are
-	// offered; disable, allow and prefer are not.
+	// offered; disable, allow and prefer are not. The operator verifies the
+	// certificate chain and the host name in every mode; set tls.serverName when
+	// the certificate names another host.
 	// +kubebuilder:default=verify-full
 	// +optional
 	SSLMode SSLMode `json:"sslMode,omitempty"`
@@ -67,6 +71,7 @@ type PostgreSQL struct {
 	// spec.extensions of a Database must be a subset.
 	// +kubebuilder:validation:MaxItems=50
 	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_-]*$`
 	// +kubebuilder:default={}
 	// +optional
 	AllowedExtensions []string `json:"allowedExtensions,omitempty"`

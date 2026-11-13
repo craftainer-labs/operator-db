@@ -28,9 +28,11 @@ var (
 	// ErrInvalidHost is returned for a spec.host that is neither a DNS-1123
 	// host name nor an IP address.
 	ErrInvalidHost = errors.New("spec.host must be a host name or an IP address")
-	// ErrInvalidProxyURL is returned for a spec.proxyURL that does not parse
-	// or is not an http, https or socks5 URL with a host.
-	ErrInvalidProxyURL = errors.New("spec.proxyURL must be an http, https or socks5 URL with a host")
+	// ErrInvalidProxyURL is returned for a spec.proxyURL that does not parse,
+	// is not an http, https or socks5 URL with a host, or carries userinfo
+	// (user decision 1, 2026-11-03: credentials come only from Secret
+	// references, never from a plain spec field).
+	ErrInvalidProxyURL = errors.New("spec.proxyURL must be an http, https or socks5 URL with a host and without user:password@")
 )
 
 // SetupClusterDatabaseServerWebhookWithManager registers the
@@ -126,7 +128,8 @@ func validHost(host string) bool {
 	return net.ParseIP(host) != nil || len(validation.IsDNS1123Subdomain(strings.ToLower(host))) == 0
 }
 
-// validProxyURL reports whether raw is an http, https or socks5 URL with a host.
+// validProxyURL reports whether raw is an http, https or socks5 URL with a host
+// and no userinfo.
 func validProxyURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -134,7 +137,7 @@ func validProxyURL(raw string) bool {
 	}
 	switch u.Scheme {
 	case "http", "https", "socks5":
-		return u.Host != ""
+		return u.Host != "" && u.User == nil
 	default:
 		return false
 	}

@@ -87,6 +87,7 @@ spec:
                   spec.extensions of a Database must be a subset.
                 items:
                   maxLength: 63
+                  pattern: ^[a-z_][a-z0-9_-]*$
                   type: string
                 maxItems: 50
                 type: array
@@ -121,7 +122,9 @@ spec:
                 default: verify-full
                 description: |-
                   sslMode is the libpq sslmode. verify-full, verify-ca and require are
-                  offered; disable, allow and prefer are not.
+                  offered; disable, allow and prefer are not. The operator verifies the
+                  certificate chain and the host name in every mode; set tls.serverName when
+                  the certificate names another host.
                 enum:
                 - verify-full
                 - verify-ca

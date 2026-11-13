@@ -88,6 +88,7 @@ spec:
                   allowedExtensions; the controller checks that.
                 items:
                   maxLength: 63
+                  pattern: ^[a-z_][a-z0-9_-]*$
                   type: string
                 maxItems: 20
                 type: array
