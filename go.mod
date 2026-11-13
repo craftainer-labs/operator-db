@@ -2,7 +2,7 @@ module github.com/craftainer-labs/operator-db
 
 go 1.26.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/craftainer-labs/lib-operator-go v0.1.1
