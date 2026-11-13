@@ -439,3 +439,24 @@ func TestServerProbesWriteTheStatusOfBothKinds(t *testing.T) {
 	g.Expect(namespaced.Status.LastProbeTime).To(BeNil())
 	g.Expect(stop()).To(Succeed())
 }
+
+// The Secret and the ConfigMap cache each keep only the objects labelled
+// managed-by this operator (EB-2); the probes' watches go through them.
+func TestCacheByObjectRestrictsSecretsAndConfigMaps(t *testing.T) {
+	g := NewWithT(t)
+	want := "app.kubernetes.io/managed-by=" + EventRecorderName
+	var secrets, configMaps int
+	for obj, by := range cacheByObject() {
+		g.Expect(by.Label).NotTo(BeNil())
+		g.Expect(by.Label.String()).To(Equal(want))
+		switch obj.(type) {
+		case *corev1.Secret:
+			secrets++
+		case *corev1.ConfigMap:
+			configMaps++
+		default:
+			t.Errorf("unexpected cache restriction for %T", obj)
+		}
+	}
+	g.Expect([]int{secrets, configMaps}).To(Equal([]int{1, 1}))
+}
