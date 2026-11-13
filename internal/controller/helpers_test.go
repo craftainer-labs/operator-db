@@ -45,6 +45,7 @@ func TestConnLimit(t *testing.T) {
 // never reaches the fallback; one built in memory does.
 func TestNewRoleExternalDefaults(t *testing.T) {
 	claim := &dbv1alpha1.DatabaseRole{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "tenant"}}
+	claim.Spec.DatabaseRef.Name = "orders"
 	e := newRoleExternal(&backend{}, claim)
 	if e.privileges != pgclient.ReadWrite || e.limit != -1 || claim.GetExternalName() != e.base || e.base == "" {
 		t.Errorf("external = %+v", e)
