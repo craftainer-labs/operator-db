@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -142,6 +143,10 @@ func TestRoleLifecycleAndRotation(t *testing.T) {
 	h.fake.want(t, `|ALTER ROLE "`+base+`_a" WITH NOLOGIN PASSWORD NULL`)
 	h.fake.wantNot(t, `"`+base+`_b" WITH NOLOGIN`)
 	h.rec.AssertEvent(t, "Normal", conditions.EventRotationFinished, "")
+	h.get(role)
+	if _, _, msg := condition(role.Status.Conditions, ConditionSessionsTerminated); msg != "" {
+		t.Errorf("a retire that ended the sessions left the condition: %s", msg)
+	}
 
 	// Drift: the privileges changed in the spec; the role is updated and the
 	// active login (b, from the marker) gets a new password.
@@ -274,4 +279,57 @@ func TestRoleStatementFailures(t *testing.T) {
 		t.Error("the Secret changed although the rotation failed")
 	}
 	h.rec.AssertEvent(t, "Warning", conditions.EventRotationFailed, "")
+}
+
+// An admin role that may not terminate sessions still retires the previous
+// login: the rotation finishes, with a Warning Event and a condition, and the
+// condition goes when a later retire ends the sessions.
+func TestRoleRetireWithoutTerminatePrivilege(t *testing.T) {
+	h := newHarness(t, common.DeletionRetain, nil)
+	dbr, rr := &DatabaseReconciler{h.cfg}, &RoleReconciler{h.cfg}
+	h.reconcileOK(dbr, h.database("orders", nil))
+	role := h.role("limited", "orders", nil)
+	h.reconcileOK(rr, role)
+	h.get(role)
+	base := pgclient.RoleBase(h.ns, "limited")
+	claim := h.ns + "/limited/" + string(role.UID)
+
+	rotate := func() {
+		t.Helper()
+		h.get(role)
+		patch := client.MergeFrom(role.DeepCopy())
+		role.Annotations = map[string]string{lifecycle.AnnotationRotate: role.Annotations[lifecycle.AnnotationRotate] + "1"}
+		h.must(env.Client.Patch(context.Background(), role, patch))
+		cur := "a"
+		if role.Status.Rotation != nil {
+			cur = role.Status.Rotation.Active
+		}
+		h.fake.answer = roleAnswer(base, claim, "ReadWrite", cur, true, true)
+		h.reconcileOK(rr, role)
+		h.get(role)
+		active := role.Status.Rotation.Active
+		h.fake.answer = roleAnswer(base, claim, "ReadWrite", active, true, true)
+		h.now = h.now.Add(2 * time.Hour)
+		h.reconcileOK(rr, role)
+		h.get(role)
+	}
+
+	h.fake.queryFailOn, h.fake.queryErr = "pg_terminate_backend", &pgconn.PgError{Code: "42501"}
+	rotate()
+	h.fake.want(t, `WITH NOLOGIN PASSWORD NULL`)
+	h.rec.AssertEvent(t, "Warning", ReasonSessionsNotTerminated, "")
+	status, reason, msg := condition(role.Status.Conditions, ConditionSessionsTerminated)
+	if status != metav1.ConditionFalse || reason != ReasonSessionsNotTerminated || strings.Contains(msg, "42501") {
+		t.Errorf("condition = %s/%s (%s)", status, reason, msg)
+	}
+	if role.Status.Rotation.Previous != "" {
+		t.Errorf("the rotation did not finish: %+v", role.Status.Rotation)
+	}
+
+	// Once the admin may terminate sessions, the next retire clears it.
+	h.fake.queryFailOn = ""
+	rotate()
+	if s, _, _ := condition(role.Status.Conditions, ConditionSessionsTerminated); s != "" {
+		t.Errorf("the condition stayed after a retire that ended the sessions: %s", s)
+	}
 }

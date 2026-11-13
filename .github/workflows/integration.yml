@@ -1,0 +1,111 @@
+# The operator's PostgreSQL SQL against a real server (NO2b-2): PostgreSQL 18
+# with TLS on (a CA and server certificate generated in the job), scram-sha-256
+# over hostssl only, and the client verifying the certificate chain and host
+# name (verify-full). The tests are test/integration (build tag `integration`);
+# the server is started by the same scripts the devcontainer stack uses
+# (test/integration/gen-certs.sh, pg-entrypoint.sh).
+#
+# Instance-owned: listed in .github/template-sync-manifest.local.yml, so
+# template sync never replaces it. A step-started container rather than a
+# `services:` container, because a service container starts before the
+# checkout and so cannot be handed the generated certificates and the entrypoint.
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # renovate: datasource=docker depName=postgres
+  PG_IMAGE: postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b
+  # The version scripts/develop.d/10-go.sh installs for the checks lane.
+  # renovate: datasource=github-releases depName=golangci/golangci-lint
+  GOLANGCI_LINT_VERSION: 2.15.0
+
+jobs:
+  postgres:
+    name: PostgreSQL 18 with TLS
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER_AMD64 || 'ubuntu-24.04' }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The checks lane lints with the default build tags, so test/integration
+      # (build tag `integration`) is only compiled and linted here. Same
+      # release, checksum-verified like scripts/develop.d/10-go.sh, and the
+      # repository's .golangci.yml.
+      - name: Install golangci-lint
+        run: |
+          set -euo pipefail
+          dir="golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64"
+          base="https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}"
+          tmp="$RUNNER_TEMP/golangci-lint"
+          mkdir -p "$tmp"
+          curl -LsSf -o "$tmp/$dir.tar.gz" "$base/$dir.tar.gz"
+          curl -LsSf -o "$tmp/checksums.txt" "$base/golangci-lint-${GOLANGCI_LINT_VERSION}-checksums.txt"
+          (cd "$tmp" && awk -v f="$dir.tar.gz" '$2 == f' checksums.txt | sha256sum -c -)
+          tar -xzf "$tmp/$dir.tar.gz" -C "$tmp"
+          echo "$tmp/$dir" >> "$GITHUB_PATH"
+
+      - name: Lint the integration tests
+        run: golangci-lint run --build-tags integration ./test/integration/...
+
+      - name: Generate the CA, the server certificate and the admin password
+        run: |
+          set -euo pipefail
+          test/integration/gen-certs.sh "$RUNNER_TEMP/pg-tls"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/pg-tls/admin-password")"
+
+      - name: Start PostgreSQL with TLS
+        run: |
+          set -euo pipefail
+          docker run -d --name pg -p 127.0.0.1:5432:5432 \
+            -v "$RUNNER_TEMP/pg-tls:/tls:ro" \
+            -v "$GITHUB_WORKSPACE/test/integration:/it:ro" \
+            -e POSTGRES_PASSWORD_FILE=/tls/admin-password \
+            --entrypoint sh "$PG_IMAGE" /it/pg-entrypoint.sh
+          for _ in $(seq 1 60); do
+            if docker exec pg pg_isready -h /var/run/postgresql -U postgres; then exit 0; fi
+            sleep 1
+          done
+          docker logs pg
+          echo "PostgreSQL did not become ready" >&2
+          exit 1
+
+      - name: Run the integration tests
+        run: |
+          set -euo pipefail
+          export PG_HOST=localhost PG_PORT=5432 PG_ADMIN_USER=postgres
+          export PG_CA_FILE="$RUNNER_TEMP/pg-tls/ca.crt"
+          export PG_ADMIN_PASSWORD_FILE="$RUNNER_TEMP/pg-tls/admin-password"
+          go test -tags integration -race -count=1 -v \
+            -coverpkg=./internal/pgclient/ -coverprofile="$RUNNER_TEMP/integration.cover" \
+            ./test/integration/...
+          go tool cover -func="$RUNNER_TEMP/integration.cover" | tail -n 1
+
+      - name: Show the server log
+        if: failure()
+        run: docker logs pg
+
+      - name: Remove the server
+        if: always()
+        run: docker rm -f pg

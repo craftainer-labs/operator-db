@@ -11,8 +11,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
@@ -78,13 +84,44 @@ func (r *RoleReconciler) checkDatabase(ctx context.Context, role *dbv1alpha1.Dat
 	return db.GetExternalName(), nil
 }
 
-// SetupWithManager registers the controller; it also watches the binding
-// Secrets it owns.
+// databaseRefIndex indexes DatabaseRoles by the name of the Database they use.
+const databaseRefIndex = ".spec.databaseRef.name"
+
+func indexDatabaseRef(o client.Object) []string {
+	return []string{o.(*dbv1alpha1.DatabaseRole).Spec.DatabaseRef.Name}
+}
+
+// rolesOfDatabase maps a Database to the DatabaseRoles of its namespace that
+// name it, so a role that waits for its Database is reconciled when the
+// Database changes (is created, gets its name, is deleted).
+func rolesOfDatabase(c client.Reader) handler.MapFunc {
+	return func(ctx context.Context, o client.Object) []reconcile.Request {
+		var list dbv1alpha1.DatabaseRoleList
+		if err := c.List(ctx, &list, client.InNamespace(o.GetNamespace()), client.MatchingFields{databaseRefIndex: o.GetName()}); err != nil {
+			log.FromContext(ctx).Error(err, "cannot list the roles of a Database", "database", o.GetName())
+			return nil
+		}
+		reqs := make([]reconcile.Request, len(list.Items))
+		for i := range list.Items {
+			reqs[i] = reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])}
+		}
+		return reqs
+	}
+}
+
+// SetupWithManager registers the controller. It also watches the binding
+// Secrets it owns (every change, so an edited Secret is repaired) and the
+// Databases its claims name (so a role that waits for its Database goes on
+// when the Database has its name). Only the claims themselves pass the
+// lifecycle filter.
 func (r *RoleReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &dbv1alpha1.DatabaseRole{}, databaseRefIndex, indexDatabaseRef); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&dbv1alpha1.DatabaseRole{}).
+		For(&dbv1alpha1.DatabaseRole{}, builder.WithPredicates(lifecycle.Predicates())).
 		Owns(&corev1.Secret{}).
-		WithEventFilter(lifecycle.Predicates()).
+		Watches(&dbv1alpha1.Database{}, handler.EnqueueRequestsFromMapFunc(rolesOfDatabase(mgr.GetClient()))).
 		Named("databaserole").
 		Complete(r)
 }
@@ -194,7 +231,7 @@ func (e *roleExternal) Update(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec
 
 // Delete implements lifecycle.External: every generation goes with the claim.
 func (e *roleExternal) Delete(ctx context.Context, _ pgclient.RoleState) error {
-	return e.be.admin.DropRole(ctx, e.base, e.database)
+	return e.be.admin.DropRole(ctx, e.base, e.id, e.database)
 }
 
 // RotateBegin implements lifecycle.Rotator: the new generation is the login
@@ -214,9 +251,41 @@ func (e *roleExternal) RotateBegin(ctx context.Context, _ dbv1alpha1.DatabaseRol
 
 // RotateFinish implements lifecycle.Rotator. st.Previous is empty during the
 // first grace period, so the login to retire is the one that is not active.
+//
+// Ending the sessions of the retired login is best effort: an admin role that
+// lacks pg_signal_backend cannot, and the retire still succeeds, because NOLOGIN
+// and the cleared password already refuse every new session. It is reported
+// with a log line, a Warning Event and the SessionsTerminated condition (False,
+// SessionsNotTerminated, a fixed text); the condition goes away when a later
+// retire ends the sessions.
 func (e *roleExternal) RotateFinish(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec, _ pgclient.RoleState, st lifecycle.RotationState) error {
-	return e.be.admin.Retire(ctx, e.base, pgclient.OtherGen(string(st.Active)))
+	err := e.be.admin.Retire(ctx, e.base, pgclient.OtherGen(string(st.Active)))
+	if !errors.Is(err, pgclient.ErrSessionsNotEnded) {
+		if err == nil {
+			meta.RemoveStatusCondition(e.claim.GetConditions(), ConditionSessionsTerminated)
+		}
+		return err
+	}
+	log.FromContext(ctx).Info("the retired login was disabled, but its open sessions were not ended: "+
+		"the admin role needs pg_signal_backend", "login", pgclient.LoginName(e.base, pgclient.OtherGen(string(st.Active))))
+	if e.be.recorder != nil {
+		e.be.recorder.Eventf(e.claim, nil, corev1.EventTypeWarning, ReasonSessionsNotTerminated, "Rotate", "%s", sessionsNotTerminatedText)
+	}
+	meta.SetStatusCondition(e.claim.GetConditions(), metav1.Condition{
+		Type: ConditionSessionsTerminated, Status: metav1.ConditionFalse, Reason: ReasonSessionsNotTerminated,
+		Message: sessionsNotTerminatedText, ObservedGeneration: e.claim.GetGeneration(),
+	})
+	return nil
 }
+
+// ConditionSessionsTerminated and ReasonSessionsNotTerminated report that a
+// retired login's open sessions could not be ended (see RotateFinish).
+const (
+	ConditionSessionsTerminated = "SessionsTerminated"
+	ReasonSessionsNotTerminated = "SessionsNotTerminated"
+	sessionsNotTerminatedText   = "the previous login is disabled, but its open sessions were not ended: " +
+		"the admin role needs pg_signal_backend"
+)
 
 // data is the postgresql binding of one login (ADR 0002, section 7). The CA is
 // the server's bundle; the uri carries the password, like the Secret does.

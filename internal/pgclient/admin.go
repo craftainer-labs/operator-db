@@ -27,6 +27,11 @@ var (
 	// ErrNotOwned means a role of a DatabaseRole exists and its ownership
 	// marker does not name the claim: the operator never touches it.
 	ErrNotOwned = errors.New("role belongs to another claim or is not managed by this operator")
+	// ErrSessionsNotEnded means Retire disabled the login but the admin role
+	// may not end the sessions already open on it (SQLSTATE 42501): it needs
+	// pg_signal_backend (or superuser). Nothing else failed, and no new session
+	// can open.
+	ErrSessionsNotEnded = errors.New("the admin role may not terminate sessions (needs pg_signal_backend)")
 )
 
 // The categories of a failed connection. A condition and an Event carry the
@@ -303,7 +308,7 @@ const (
 
 // ApplyRole creates what is missing and makes the rest match: the NOLOGIN
 // owner role, both logins as its members with SET ROLE to it, the active
-// login's password, the privileges on the database and, last, the marker. The
+// login's password (as a SCRAM verifier), the privileges on the database and, last, the marker. The
 // other login keeps its state, because it may be the previous generation of a
 // rotation.
 //
@@ -315,6 +320,12 @@ const (
 // privileges that were not applied.
 func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 	grants, err := privilegeStatements(p.Base, p.Privileges)
+	if err != nil {
+		return err
+	}
+	// The server gets the SCRAM-SHA-256 verifier, never the password, so
+	// statement logging cannot capture it.
+	verifier, err := ScramVerifier(p.Password)
 	if err != nil {
 		return err
 	}
@@ -346,7 +357,7 @@ func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 		}
 		alter := "ALTER ROLE " + login + " WITH CONNECTION LIMIT " + limit
 		if gen == p.Marker.Active {
-			alter = "ALTER ROLE " + login + " WITH LOGIN PASSWORD " + Literal(p.Password) + " CONNECTION LIMIT " + limit
+			alter = "ALTER ROLE " + login + " WITH LOGIN PASSWORD " + Literal(verifier) + " CONNECTION LIMIT " + limit
 		}
 		stmts = append(stmts, alter, "GRANT "+base+" TO "+login, "ALTER ROLE "+login+" SET role = "+Literal(p.Base))
 	}
@@ -395,32 +406,59 @@ func privilegeStatements(base, privileges string) ([]string, error) {
 	}, nil
 }
 
-// Retire disables the login of gen and clears its password. It succeeds when
-// the role is already gone.
+// sqlStateInsufficientPrivilege is SQLSTATE 42501.
+const sqlStateInsufficientPrivilege = "42501"
+
+func insufficientPrivilege(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == sqlStateInsufficientPrivilege
+}
+
+// Retire disables the login of gen, clears its password and ends its open
+// sessions (NOLOGIN stops new ones only). It succeeds when the role is already
+// gone. Ending the sessions is best effort: when the admin role may not
+// terminate them, the login is retired all the same and the error is
+// ErrSessionsNotEnded, which the caller reports without failing the retire.
 func (a Admin) Retire(ctx context.Context, base, gen string) error {
 	st, err := a.Role(ctx, base)
 	if err != nil || !st.Login(gen).Exists {
 		return err
 	}
+	login := LoginName(base, gen)
 	return a.with(ctx, "", func(s Session) error {
-		return s.Exec(ctx, "ALTER ROLE "+Ident(LoginName(base, gen))+" WITH NOLOGIN PASSWORD NULL")
+		if err := s.Exec(ctx, "ALTER ROLE "+Ident(login)+" WITH NOLOGIN PASSWORD NULL"); err != nil {
+			return err
+		}
+		_, err := s.Query(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = "+Literal(login))
+		if insufficientPrivilege(err) {
+			return fmt.Errorf("%w: %w", ErrSessionsNotEnded, err)
+		}
+		return err
 	})
 }
 
 // DropRole ends the sessions of the roles that exist, hands the objects they
-// own to the admin role and drops them. database may be gone already.
-func (a Admin) DropRole(ctx context.Context, base, database string) error {
+// own to the admin role and drops them. database may be gone already. A
+// missing privilege to end the sessions is not an error (see Retire). Like
+// ApplyRole it refuses a role whose marker does not name claim (ErrNotOwned)
+// and drops nothing then, whatever the caller believes it created, so a role
+// the operator did not create is never dropped.
+func (a Admin) DropRole(ctx context.Context, base, claim, database string) error {
 	st, err := a.Role(ctx, base)
 	if err != nil {
 		return err
 	}
 	var idents, literals []string
-	for name, exists := range map[string]bool{
-		base: st.Base.Exists, LoginName(base, GenA): st.A.Exists, LoginName(base, GenB): st.B.Exists,
+	for name, info := range map[string]RoleInfo{
+		base: st.Base, LoginName(base, GenA): st.A, LoginName(base, GenB): st.B,
 	} {
-		if exists {
-			idents, literals = append(idents, Ident(name)), append(literals, Literal(name))
+		if !info.Exists {
+			continue
 		}
+		if info.Marker.Claim != claim {
+			return fmt.Errorf("%w: %q", ErrNotOwned, name)
+		}
+		idents, literals = append(idents, Ident(name)), append(literals, Literal(name))
 	}
 	if len(idents) == 0 {
 		return nil
@@ -433,7 +471,11 @@ func (a Admin) DropRole(ctx context.Context, base, database string) error {
 			strings.Join(literals, ", ")+")")
 		return err
 	})
-	if err != nil {
+	// An admin that may not terminate sessions (no pg_signal_backend) still
+	// drops the roles: PostgreSQL allows DROP ROLE while sessions are open, and
+	// failing here would leave the finalizer stuck. As in Retire, the missing
+	// privilege only costs the early end of those sessions.
+	if err != nil && !insufficientPrivilege(err) {
 		return err
 	}
 	err = a.with(ctx, database, func(s Session) error {

@@ -21,15 +21,15 @@ func TestServerSpecOfBothKinds(t *testing.T) {
 	ns.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "local-admin"}
 	h.must(env.Client.Create(context.Background(), ns))
 
-	got, err := h.cfg.serverSpec(context.Background(), h.ns, common.ServerRef{Kind: dbv1alpha1.KindDatabaseServer, Name: "local"})
-	if err != nil || got.Host != "local.example.test" {
+	got, err := h.cfg.fetchServer(context.Background(), h.ns, common.ServerRef{Kind: dbv1alpha1.KindDatabaseServer, Name: "local"})
+	if err != nil || got.spec.Host != "local.example.test" {
 		t.Errorf("namespaced: %+v, %v", got, err)
 	}
-	got, err = h.cfg.serverSpec(context.Background(), h.ns, h.ref())
-	if err != nil || got.Host != "pg.example.test" {
+	got, err = h.cfg.fetchServer(context.Background(), h.ns, h.ref())
+	if err != nil || got.spec.Host != "pg.example.test" {
 		t.Errorf("cluster: %+v, %v", got, err)
 	}
-	if _, err = h.cfg.serverSpec(context.Background(), h.ns, common.ServerRef{Kind: dbv1alpha1.KindDatabaseServer, Name: "absent"}); err == nil {
+	if _, err = h.cfg.fetchServer(context.Background(), h.ns, common.ServerRef{Kind: dbv1alpha1.KindDatabaseServer, Name: "absent"}); err == nil {
 		t.Error("a missing namespaced server was found")
 	}
 }

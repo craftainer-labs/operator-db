@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/craftainer-labs/operator-db/internal/egress"
 )
@@ -70,15 +71,20 @@ func (t Target) tlsConfig() (*tls.Config, error) {
 }
 
 func (t Target) config() (*pgx.ConnConfig, error) {
-	tlsCfg, err := t.tlsConfig()
-	if err != nil {
-		return nil, err
-	}
 	// sslmode=disable only keeps ParseConfig from building plaintext fallbacks;
-	// the TLS configuration is set below and is required.
+	// the TLS configuration is set by apply and is required.
 	cfg, err := pgx.ParseConfig("sslmode=disable")
 	if err != nil {
 		return nil, err
+	}
+	return cfg, t.apply(cfg)
+}
+
+// apply points cfg at the target.
+func (t Target) apply(cfg *pgx.ConnConfig) error {
+	tlsCfg, err := t.tlsConfig()
+	if err != nil {
+		return err
 	}
 	cfg.Host, cfg.Port, cfg.Database = t.Host, t.Port, t.Database
 	cfg.User, cfg.Password = t.User, t.Password
@@ -92,8 +98,11 @@ func (t Target) config() (*pgx.ConnConfig, error) {
 	cfg.RuntimeParams["standard_conforming_strings"] = "on"
 	cfg.RuntimeParams["password_encryption"] = "scram-sha-256"
 	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-	return cfg, nil
+	return nil
 }
+
+// Connector opens a Session on a Target; Connect is the production one.
+type Connector func(ctx context.Context, t Target) (Session, error)
 
 // Connect opens a Session.
 func Connect(ctx context.Context, t Target) (Session, error) {
@@ -105,19 +114,30 @@ func Connect(ctx context.Context, t Target) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return conn{c}, nil
+	return session{q: c, done: func(ctx context.Context) { _ = c.Close(ctx) }}, nil
 }
 
-type conn struct{ c *pgx.Conn }
+// querier is what *pgx.Conn and *pgxpool.Conn share.
+type querier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
 
-func (c conn) Exec(ctx context.Context, sql string) error {
-	_, err := c.c.Exec(ctx, sql)
+// session adapts a connection to Session; done ends it (closes it, or gives it
+// back to its pool).
+type session struct {
+	q    querier
+	done func(context.Context)
+}
+
+func (s session) Exec(ctx context.Context, sql string) error {
+	_, err := s.q.Exec(ctx, sql)
 	return err
 }
 
-func (c conn) Query(ctx context.Context, sql string) ([]Row, error) {
+func (s session) Query(ctx context.Context, sql string) ([]Row, error) {
 	var maps []map[string]any
-	rows, err := c.c.Query(ctx, sql)
+	rows, err := s.q.Query(ctx, sql)
 	if err == nil {
 		maps, err = pgx.CollectRows(rows, pgx.RowToMap)
 	}
@@ -137,4 +157,4 @@ func (c conn) Query(ctx context.Context, sql string) ([]Row, error) {
 	return out, nil
 }
 
-func (c conn) Close(ctx context.Context) { _ = c.c.Close(ctx) }
+func (s session) Close(ctx context.Context) { s.done(ctx) }

@@ -67,6 +67,9 @@ type pgFake struct {
 	connErr error
 	// failOn makes the statements that contain it fail.
 	failOn string
+	// queryFailOn makes the queries that contain it return queryErr.
+	queryFailOn string
+	queryErr    error
 }
 
 var (
@@ -133,7 +136,11 @@ func (s *pgSession) Query(_ context.Context, sql string) ([]pgclient.Row, error)
 	s.f.mu.Lock()
 	s.f.stmts = append(s.f.stmts, s.db+"|"+sql)
 	answer := s.f.answer
+	failed := s.f.queryFailOn != "" && strings.Contains(sql, s.f.queryFailOn)
 	s.f.mu.Unlock()
+	if failed {
+		return nil, s.f.queryErr
+	}
 	if answer == nil {
 		return nil, nil
 	}

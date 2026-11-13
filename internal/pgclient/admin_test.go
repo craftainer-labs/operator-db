@@ -31,6 +31,7 @@ type fakePG struct {
 	closed  int
 	rows    []scripted
 	failOn  string
+	failErr error // returned instead of errBoom
 	openErr map[string]error
 }
 
@@ -51,6 +52,9 @@ type fakeSession struct {
 func (s *fakeSession) record(sql string) error {
 	s.f.stmts = append(s.f.stmts, s.db+"|"+sql)
 	if s.f.failOn != "" && strings.Contains(sql, s.f.failOn) {
+		if s.f.failErr != nil {
+			return s.f.failErr
+		}
 		return errBoom
 	}
 	return nil
@@ -272,7 +276,7 @@ func TestApplyRole(t *testing.T) {
 		// Every role is created with its ownership marker in the same query.
 		`|CREATE ROLE "team-a_app_x" NOLOGIN; COMMENT ON ROLE "team-a_app_x" IS 'craftainer.dev/claim=team-a/app/uid-1'`,
 		`|CREATE ROLE "team-a_app_x_a" NOLOGIN; COMMENT ON ROLE "team-a_app_x_a" IS 'craftainer.dev/claim=team-a/app/uid-1'`,
-		`|ALTER ROLE "team-a_app_x_a" WITH LOGIN PASSWORD 'p''w' CONNECTION LIMIT 7`,
+		`|ALTER ROLE "team-a_app_x_a" WITH LOGIN PASSWORD 'SCRAM-SHA-256$4096:`,
 		`|ALTER ROLE "team-a_app_x_b" WITH CONNECTION LIMIT 7`,
 		`|GRANT "team-a_app_x" TO "team-a_app_x_a"`,
 		`|ALTER ROLE "team-a_app_x_b" SET role = 'team-a_app_x'`,
@@ -280,7 +284,7 @@ func TestApplyRole(t *testing.T) {
 		`|GRANT CONNECT ON DATABASE "team-a_db_y" TO "team-a_app_x"`,
 		`team-a_db_y|GRANT USAGE ON SCHEMA public TO "team-a_app_x"`,
 		`team-a_db_y|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "team-a_app_x"`)
-	f.wantNot(t, "GRANT ALL ON DATABASE")
+	f.wantNot(t, "GRANT ALL ON DATABASE", "p'w", "p''w")
 
 	// A second login that exists is left alone, and Owner gets ALL.
 	f = &fakePG{rows: roleRows(p.Base, true)}
@@ -308,6 +312,13 @@ func TestApplyRole(t *testing.T) {
 	if err := f.admin().ApplyRole(ctx, p); !errors.Is(err, errBoom) {
 		t.Errorf("observe failure: %v", err)
 	}
+	// A password that has no verifier is refused before any statement.
+	f = &fakePG{}
+	bad = p
+	bad.Password = "pässword"
+	if err := f.admin().ApplyRole(ctx, bad); !errors.Is(err, ErrPasswordNotASCII) || len(f.stmts) != 0 {
+		t.Errorf("non-ASCII password: %v, %v", err, f.stmts)
+	}
 	f = &fakePG{failOn: "CREATE ROLE"}
 	if err := f.admin().ApplyRole(ctx, p); !errors.Is(err, errBoom) {
 		t.Errorf("role failure: %v", err)
@@ -324,7 +335,8 @@ func TestRetire(t *testing.T) {
 	if err := f.admin().Retire(ctx, "r", GenA); err != nil {
 		t.Fatal(err)
 	}
-	f.want(t, `|ALTER ROLE "r_a" WITH NOLOGIN PASSWORD NULL`)
+	f.want(t, `|ALTER ROLE "r_a" WITH NOLOGIN PASSWORD NULL`,
+		`|SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'r_a'`)
 
 	// A login that is already gone is fine.
 	f = &fakePG{}
@@ -332,9 +344,23 @@ func TestRetire(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.wantNot(t, "ALTER ROLE")
-	f = &fakePG{failOn: "pg_roles"}
-	if err := f.admin().Retire(ctx, "r", GenA); !errors.Is(err, errBoom) {
-		t.Errorf("observe failure: %v", err)
+	for _, fail := range []string{"pg_roles", "NOLOGIN", "pg_terminate_backend"} {
+		f = &fakePG{rows: roleRows("r", true), failOn: fail}
+		if err := f.admin().Retire(ctx, "r", GenA); !errors.Is(err, errBoom) {
+			t.Errorf("failOn %q: %v", fail, err)
+		}
+	}
+
+	// An admin that may not terminate sessions has still retired the login; the
+	// error says so. Other server errors on the terminate query still fail.
+	f = &fakePG{rows: roleRows("r", true), failOn: "pg_terminate_backend", failErr: &pgconn.PgError{Code: "42501"}}
+	if err := f.admin().Retire(ctx, "r", GenA); !errors.Is(err, ErrSessionsNotEnded) {
+		t.Errorf("insufficient privilege: %v", err)
+	}
+	f.want(t, `|ALTER ROLE "r_a" WITH NOLOGIN PASSWORD NULL`)
+	f = &fakePG{rows: roleRows("r", true), failOn: "pg_terminate_backend", failErr: &pgconn.PgError{Code: "53300"}}
+	if err := f.admin().Retire(ctx, "r", GenA); err == nil || errors.Is(err, ErrSessionsNotEnded) {
+		t.Errorf("other error: %v", err)
 	}
 }
 
@@ -410,7 +436,7 @@ func TestConnectionErrorsAreCoarse(t *testing.T) {
 func TestDropRole(t *testing.T) {
 	ctx := context.Background()
 	f := &fakePG{rows: roleRows("r", true)}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil {
+	if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); err != nil {
 		t.Fatal(err)
 	}
 	f.want(t,
@@ -419,22 +445,43 @@ func TestDropRole(t *testing.T) {
 		`db|DROP OWNED BY "r", "r_a", "r_b"`,
 		`|DROP ROLE IF EXISTS "r", "r_a", "r_b"`)
 
+	// A role of another claim, or without a marker, is refused and nothing is
+	// dropped, whichever of the three it is.
+	for _, foreign := range []string{"someone/else/uid", ""} {
+		f = &fakePG{rows: roleRows("r", true)}
+		f.rows[0].rows[1]["comment"] = markerPrefix + foreign
+		if foreign == "" {
+			f.rows[0].rows[1]["comment"] = ""
+		}
+		err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db")
+		if !errors.Is(err, ErrNotOwned) || strings.Contains(f.joined(), "DROP") || strings.Contains(f.joined(), "terminate") {
+			t.Errorf("foreign %q: %v, %v", foreign, err, f.stmts)
+		}
+	}
+
 	// Nothing left to drop.
 	f = &fakePG{}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil || len(f.stmts) != 1 {
+	if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); err != nil || len(f.stmts) != 1 {
 		t.Errorf("empty drop: %v, %v", err, f.stmts)
 	}
 
 	// The database is gone: its owned objects went with it.
 	f = &fakePG{rows: roleRows("r", true), openErr: map[string]error{"db": &pgconn.PgError{Code: "3D000"}}}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil {
+	if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); err != nil {
 		t.Fatal(err)
 	}
 	f.want(t, `DROP ROLE IF EXISTS`)
 
+	// An admin that may not end sessions still drops the roles.
+	f = &fakePG{rows: roleRows("r", true), failOn: "pg_terminate_backend", failErr: &pgconn.PgError{Code: "42501"}}
+	if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); err != nil {
+		t.Errorf("insufficient privilege: %v", err)
+	}
+	f.want(t, `|DROP ROLE IF EXISTS "r", "r_a", "r_b"`)
+
 	for _, fail := range []string{"pg_roles", "pg_terminate_backend", "REASSIGN OWNED", "DROP ROLE"} {
 		f = &fakePG{rows: roleRows("r", true), failOn: fail}
-		if err := f.admin().DropRole(ctx, "r", "db"); !errors.Is(err, errBoom) {
+		if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); !errors.Is(err, errBoom) {
 			t.Errorf("failOn %q: %v", fail, err)
 		}
 	}

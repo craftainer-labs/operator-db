@@ -63,11 +63,41 @@ always quoted with `pgx.Identifier`, and extension names must match
   `COMMENT ON DATABASE "<name>" IS 'craftainer.dev/claim=<namespace>/<name>/<uid>'`
   (`ROLE` for a role) to hand the object over, or set `spec.deletionPolicy:
   Retain` (a `Database`) so that deleting the claim leaves the object alone.
-- Known limits, both for NO2b-2 (they need a real PostgreSQL to verify): login
-  passwords are sent as `ALTER ROLE ... PASSWORD '<literal>'` in clear text, not
-  as a client-side SCRAM verifier, so the server's statement logging must stay
-  off for them ([NFR-0004](docs/nfrs/NFR-0004-least-privilege-and-no-credentials-in-output.md));
-  and retiring a login does not end its open sessions.
+- Login passwords never reach the server in clear: the operator computes the
+  SCRAM-SHA-256 verifier (RFC 5802; passwords are ASCII, for which SASLprep is
+  the identity) and sends `ALTER ROLE ... PASSWORD 'SCRAM-SHA-256$...'`, which
+  PostgreSQL stores as it is, so statement logging and `pg_stat_statements`
+  hold only the verifier ([NFR-0004](docs/nfrs/NFR-0004-least-privilege-and-no-credentials-in-output.md)).
+  Retiring a login (`NOLOGIN`, password cleared) also ends its open sessions
+  with `pg_terminate_backend`, which needs the admin role to be a superuser or
+  a member of `pg_signal_backend`. Without it the retire still succeeds,
+  because `NOLOGIN` and the cleared password already refuse every new session:
+  the operator logs a warning, emits a `SessionsNotTerminated` Warning Event
+  and sets the `SessionsTerminated` condition to `False` with that reason
+  (cleared by the next retire that ends the sessions). Any other error on that
+  statement fails the retire. Deleting a `DatabaseRole` likewise drops its roles
+  without ending their sessions when the privilege is missing.
+- The admin connections of a server are reused between reconciles: one
+  `pgxpool` per server (at most two connections, idle ones closed after 30
+  seconds, health-checked every 30 seconds, a broken one discarded when it is
+  released), only for the admin database; a claim's database is opened and
+  closed per use, because `DROP DATABASE ... WITH (FORCE)` would kill a pooled
+  session. The pool is keyed on the server's UID and generation and a hash of
+  the resolved connection (host, port, credentials, CA, TLS settings, proxy), so
+  a rotated admin Secret or CA replaces it (the old pool is closed in the
+  background; a reconcile that still holds it fails once as an unreachable
+  server and is retried), and it is dropped when the server is gone or
+  invalid, or unused for ten minutes.
+- A `DatabaseRole` is reconciled again when the `Database` it names changes (a
+  watch through a field index), so a role waiting for its `Database` goes on as
+  soon as the `Database` has its name.
+- Deleting a `DatabaseRole` checks the ownership marker of its roles again
+  before dropping them, so a role the claim did not create is refused
+  (`ErrNotOwned`) whatever the caller believes.
+- Known limits: a session the server closed costs one failed reconcile before
+  the pool opens a new connection; objects an
+  `Owner` role creates later are covered only at the next privilege change (see
+  above).
 - Server health probing (`ClusterDatabaseServer` and `DatabaseServer` status) is
   not in yet.
 
@@ -77,11 +107,17 @@ Configuration, as flags with environment defaults:
 | --- | --- | --- |
 | `DEFAULT_DATA_DELETION_POLICY` | `--default-data-deletion-policy` | `Retain` (default) or `Delete`, pinned into a new `Database` that leaves `deletionPolicy` unset; anything else fails startup |
 | `EGRESS_MODE` | `--egress-mode` | `strict` (default) blocks loopback, link-local and metadata, and private ranges; `allow-private` blocks all but the private ranges ([NFR-0003](docs/nfrs/NFR-0003-restricted-egress-and-proxy.md)) |
-| `POD_NAMESPACE` | `--operator-namespace` | where a cluster server's admin Secret is read; empty uses the service account's namespace |
+| `POD_NAMESPACE` | `--operator-namespace` | where a cluster server's admin Secret is read; empty uses the service account's namespace, and startup fails when neither names one |
+
+The chart sets the first two from the values `egressMode` (default `strict`)
+and `defaultDataDeletionPolicy` (default `Retain`).
 
 The tests of the controller run against the Kubernetes API (envtest) with a fake
-PostgreSQL behind `pgclient.Session`. The lane that runs the SQL against a real
-PostgreSQL with TLS is NO2b-2. The non-functional requirements are in
+PostgreSQL behind `pgclient.Session`. The SQL runs against a real PostgreSQL 18
+with TLS (verify-full, scram-sha-256) in the integration lane,
+[`test/integration`](test/integration/README.md) (build tag `integration`;
+`.github/workflows/integration.yml` in CI, the `postgres` service of the
+devcontainer locally); the 100% coverage gate stays on the unit profile. The non-functional requirements are in
 [`docs/nfrs`](docs/nfrs).
 
 ## Quick start
