@@ -472,6 +472,13 @@ func TestDropRole(t *testing.T) {
 	}
 	f.want(t, `DROP ROLE IF EXISTS`)
 
+	// An admin that may not end sessions still drops the roles.
+	f = &fakePG{rows: roleRows("r", true), failOn: "pg_terminate_backend", failErr: &pgconn.PgError{Code: "42501"}}
+	if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); err != nil {
+		t.Errorf("insufficient privilege: %v", err)
+	}
+	f.want(t, `|DROP ROLE IF EXISTS "r", "r_a", "r_b"`)
+
 	for _, fail := range []string{"pg_roles", "pg_terminate_backend", "REASSIGN OWNED", "DROP ROLE"} {
 		f = &fakePG{rows: roleRows("r", true), failOn: fail}
 		if err := f.admin().DropRole(ctx, "r", "team-a/app/uid-1", "db"); !errors.Is(err, errBoom) {

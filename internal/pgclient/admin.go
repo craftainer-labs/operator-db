@@ -434,7 +434,8 @@ func (a Admin) Retire(ctx context.Context, base, gen string) error {
 }
 
 // DropRole ends the sessions of the roles that exist, hands the objects they
-// own to the admin role and drops them. database may be gone already. Like
+// own to the admin role and drops them. database may be gone already. A
+// missing privilege to end the sessions is not an error (see Retire). Like
 // ApplyRole it refuses a role whose marker does not name claim (ErrNotOwned)
 // and drops nothing then, whatever the caller believes it created, so a role
 // the operator did not create is never dropped.
@@ -466,7 +467,12 @@ func (a Admin) DropRole(ctx context.Context, base, claim, database string) error
 			strings.Join(literals, ", ")+")")
 		return err
 	})
-	if err != nil {
+	// An admin that may not terminate sessions (no pg_signal_backend) still
+	// drops the roles: PostgreSQL allows DROP ROLE while sessions are open, and
+	// failing here would leave the finalizer stuck. As in Retire, the missing
+	// privilege only costs the early end of those sessions.
+	var pgErr *pgconn.PgError
+	if err != nil && !(errors.As(err, &pgErr) && pgErr.Code == sqlStateInsufficientPrivilege) {
 		return err
 	}
 	err = a.with(ctx, database, func(s Session) error {

@@ -75,7 +75,8 @@ always quoted with `pgx.Identifier`, and extension names must match
   the operator logs a warning, emits a `SessionsNotTerminated` Warning Event
   and sets the `SessionsTerminated` condition to `False` with that reason
   (cleared by the next retire that ends the sessions). Any other error on that
-  statement fails the retire.
+  statement fails the retire. Deleting a `DatabaseRole` likewise drops its roles
+  without ending their sessions when the privilege is missing.
 - The admin connections of a server are reused between reconciles: one
   `pgxpool` per server (at most two connections, idle ones closed after 30
   seconds, health-checked every 30 seconds, a broken one discarded when it is
