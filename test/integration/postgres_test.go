@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -58,13 +59,13 @@ func load(t *testing.T) server {
 	if caFile == "" {
 		t.Fatal("PG_CA_FILE is not set; see test/integration/README.md")
 	}
-	ca, err := os.ReadFile(caFile)
+	ca, err := os.ReadFile(filepath.Clean(caFile))
 	if err != nil {
 		t.Fatal(err)
 	}
 	password := os.Getenv("PG_ADMIN_PASSWORD")
 	if file := os.Getenv("PG_ADMIN_PASSWORD_FILE"); password == "" && file != "" {
-		b, err := os.ReadFile(file)
+		b, err := os.ReadFile(filepath.Clean(file))
 		if err != nil {
 			t.Fatal(err)
 		}
