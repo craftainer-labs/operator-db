@@ -131,6 +131,9 @@ func TestNilServerCacheCachesNothing(t *testing.T) {
 		t.Error("a nil cache did not build")
 	}
 	c.Forget("k")
+	if c.Len() != 0 {
+		t.Error("a nil cache holds servers")
+	}
 	p.Close()
 }
 
