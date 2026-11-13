@@ -639,3 +639,26 @@ func TestRetireWithoutTerminatePrivilege(t *testing.T) {
 		t.Error("the retired login can open a new session")
 	}
 }
+
+// The health probe reads server_version over the verified connection, and a
+// failed one names a category, never the host or the password.
+func TestServerVersion(t *testing.T) {
+	ctx := context.Background()
+	sv := load(t)
+
+	got, err := sv.admin().ServerVersion(ctx)
+	if err != nil {
+		t.Fatalf("ServerVersion: %v", err)
+	}
+	if !strings.HasPrefix(got, "18") {
+		t.Errorf("server_version = %q, want PostgreSQL 18", got)
+	}
+
+	_, err = sv.admin(func(t *pgclient.Target) { t.Password = "wrong-secret" }).ServerVersion(ctx)
+	if !errors.Is(err, lifecycle.ErrUnreachable) || !errors.Is(err, pgclient.ErrConnAuth) {
+		t.Fatalf("a wrong password: %v", err)
+	}
+	if strings.Contains(err.Error(), "wrong-secret") || strings.Contains(err.Error(), sv.host) {
+		t.Errorf("the error leaks the password or the host: %v", err)
+	}
+}

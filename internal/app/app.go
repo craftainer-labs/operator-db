@@ -36,6 +36,7 @@ import (
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
+	"github.com/craftainer-labs/lib-operator-go/pkg/probe"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
@@ -319,9 +320,25 @@ func setup(mgr ctrl.Manager, webhooks bool, cs controllerSettings) error {
 	}
 	steps = append(steps,
 		setupStep{"Database controller", (&controller.DatabaseReconciler{Config: cfg}).SetupWithManager},
-		setupStep{"DatabaseRole controller", (&controller.RoleReconciler{Config: cfg}).SetupWithManager})
+		setupStep{"DatabaseRole controller", (&controller.RoleReconciler{Config: cfg}).SetupWithManager},
+		setupStep{"ClusterDatabaseServer probe", serverProbe(mgr, cfg, cs.namespace,
+			func() probe.Server { return &dbv1alpha1.ClusterDatabaseServer{} })},
+		setupStep{"DatabaseServer probe", serverProbe(mgr, cfg, cs.namespace,
+			func() probe.Server { return &dbv1alpha1.DatabaseServer{} })})
 	// +kubebuilder:scaffold:builder
 	return runSteps(mgr, steps)
+}
+
+// serverProbe returns the setup of the probe.Reconciler of one server kind,
+// which writes the kind's status (serverVersion, lastProbeTime, Ready and
+// ServerReachable) from a PostgreSQL probe. Its Client reads Secrets and
+// ConfigMaps live (managerOptions), and its watches on them go through the
+// manager's cache.
+func serverProbe(mgr ctrl.Manager, cfg controller.Config, operatorNS string, kind func() probe.Server) func(ctrl.Manager) error {
+	return (&probe.Reconciler{
+		Client: mgr.GetClient(), New: kind, Prober: controller.Prober{Config: cfg},
+		Options: probe.Options{OperatorNamespace: operatorNS},
+	}).SetupWithManager
 }
 
 // runSteps runs the setup steps in order and stops at the first failure.

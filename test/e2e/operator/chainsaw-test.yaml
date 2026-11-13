@@ -413,6 +413,35 @@ spec:
                 port: 5432
                 sslMode: verify-full
 
+    - name: the servers report their own status
+      # The probe writes this, so a claim becoming Ready is no longer the
+      # evidence that a server is: assert it on the servers themselves.
+      try:
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: db.craftainer.dev/v1alpha1
+              kind: ClusterDatabaseServer
+              metadata:
+                name: e2e-pg
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+                (conditions[?type == 'ServerReachable'] | [0].status): "True"
+                (length(serverVersion) > `0`): true
+                (lastProbeTime != null): true
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: db.craftainer.dev/v1alpha1
+              kind: DatabaseServer
+              metadata:
+                name: team-pg
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+                (conditions[?type == 'ServerReachable'] | [0].status): "True"
+                (length(serverVersion) > `0`): true
+                (lastProbeTime != null): true
+
     - name: Database and DatabaseRole are created and become ready
       try:
         - apply:

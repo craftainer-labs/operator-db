@@ -176,6 +176,9 @@ type DatabaseServerList struct {
 // GetCommon returns the settings every server kind shares (server.Server).
 func (s *ClusterDatabaseServer) GetCommon() *common.ServerCommon { return &s.Spec.ServerCommon }
 
+// GetServerStatus returns the status the probe writes (probe.Server).
+func (s *ClusterDatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status }
+
 // GetEndpoint returns host:port (server.Server).
 func (s *ClusterDatabaseServer) GetEndpoint() string { return s.Spec.endpoint() }
 
@@ -186,6 +189,9 @@ func (s *ClusterDatabaseServer) GetAllowedNamespaces() *common.AllowedNamespaces
 
 // GetCommon returns the settings every server kind shares (server.Server).
 func (s *DatabaseServer) GetCommon() *common.ServerCommon { return &s.Spec.ServerCommon }
+
+// GetServerStatus returns the status the probe writes (probe.Server).
+func (s *DatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status }
 
 // GetEndpoint returns host:port (server.Server).
 func (s *DatabaseServer) GetEndpoint() string { return s.Spec.endpoint() }
