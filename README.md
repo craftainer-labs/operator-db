@@ -147,8 +147,8 @@ devcontainer locally); the 100% coverage gate stays on the unit profile. The non
 
 ## Install
 
-Both ways need cert-manager for the webhooks' serving certificate (OLM issues
-its own, so OLM v0 needs none). The released chart, bundle and catalog are on
+Helm and OLM v1 need cert-manager for the webhooks' serving certificate; OLM
+v0 issues its own, so it needs none. The released chart, bundle and catalog are on
 GHCR, signed and attested (`release-extras.yml`, see `docs/TEMPLATE.md`).
 
 ### Helm
