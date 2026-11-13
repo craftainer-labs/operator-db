@@ -433,7 +433,8 @@ spec:
               status:
                 (conditions[?type == 'Ready'] | [0].status): "True"
                 (conditions[?type == 'Synced'] | [0].status): "True"
-                effectiveDeletionPolicy: Delete
+                # The pinned default; spec.deletionPolicy (Delete) wins at deletion.
+                effectiveDeletionPolicy: Retain
         - apply:
             resource:
               apiVersion: db.craftainer.dev/v1alpha1
