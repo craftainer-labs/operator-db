@@ -393,6 +393,7 @@ func TestConnectionErrorsAreCoarse(t *testing.T) {
 		"deadline":      {wrap(context.DeadlineExceeded), ErrConnTimeout},
 		"net timeout":   {wrap(&net.DNSError{Name: secret, IsTimeout: true}), ErrConnTimeout},
 		"refused":       {wrap(errors.New("connection refused")), ErrConnFailed},
+		"host with tls": {wrap(errors.New("lookup outls.example: no such host")), ErrConnFailed},
 		"other pgerror": {wrap(&pgconn.PgError{Code: "53300", Message: secret}), ErrConnFailed},
 	} {
 		f := &fakePG{openErr: map[string]error{"": tc.err}}

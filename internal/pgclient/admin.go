@@ -54,6 +54,14 @@ func (e *connError) Unwrap() []error {
 	return []error{lifecycle.ErrUnreachable, e.category, e.cause}
 }
 
+// tlsText reports whether the text of a connection error is one of pgconn's and
+// crypto/tls's TLS failures ("tls error", "tls: ...", "x509: ..."), not just a
+// host name that contains "tls".
+func tlsText(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "tls error") || strings.Contains(msg, "tls: ") || strings.Contains(msg, "x509: ")
+}
+
 // classify maps a connection failure to its category.
 func classify(err error) error {
 	var pgErr *pgconn.PgError
@@ -64,10 +72,10 @@ func classify(err error) error {
 		return ErrConnPolicy
 	case errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "28"):
 		return ErrConnAuth
-	case errors.As(err, &verify) || strings.Contains(strings.ToLower(err.Error()), "tls"):
-		return ErrConnTLS
 	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
 		return ErrConnTimeout
+	case errors.As(err, &verify) || tlsText(err.Error()):
+		return ErrConnTLS
 	}
 	return ErrConnFailed
 }
