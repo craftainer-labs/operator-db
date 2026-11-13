@@ -120,9 +120,11 @@ func TestDatabaseCreateIntentIsRecordedFirst(t *testing.T) {
 	raced := h.database("raced", nil)
 	h.fake.answer = nil
 	h.fake.failOn, h.fake.failErr = "CREATE DATABASE", &pgconn.PgError{Code: "42P04"}
-	if err := h.reconcile(r, raced); err == nil {
-		t.Fatal("a taken name was created")
+	var pgErr *pgconn.PgError
+	if err := h.reconcile(r, raced); !errors.As(err, &pgErr) || pgErr.Code != "42P04" {
+		t.Fatalf("a taken name: %v", err)
 	}
+	h.fake.want(t, "CREATE DATABASE")
 	h.get(raced)
 	if raced.Status.ExternalID != "" {
 		t.Errorf("externalId = %q, want it withdrawn", raced.Status.ExternalID)
