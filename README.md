@@ -54,15 +54,15 @@ always quoted with `pgx.Identifier`, and extension names must match
 - The operator only manages what it can show it created. Every role is created
   together with its ownership marker, and `Database` records in
   `status.externalId` that it issued the create before `CREATE DATABASE` runs
-  (that statement cannot share a transaction with `COMMENT ON DATABASE`). A
+  (that statement cannot share a transaction with `COMMENT ON DATABASE`), and
+  `DatabaseRole` does the same before its first statement. A
   database or role that exists without a marker of the claim is reported as a
   `NameCollision` condition ("database exists and is not managed by this
   operator" or "belongs to another claim") and is never changed or dropped.
-  The claim cannot be deleted while it is in that state, because the operator
-  must look at the object first. To resolve it, either rename the claim, or
-  `COMMENT ON DATABASE "<name>" IS 'craftainer.dev/claim=<namespace>/<name>/<uid>'`
-  (`ROLE` for a role) to hand the object over, or set `spec.deletionPolicy:
-  Retain` (a `Database`) so that deleting the claim leaves the object alone.
+  Deleting a claim in that state leaves the object alone and releases the
+  finalizer (see "Deleting a claim" below). To resolve it, either rename the
+  claim, or `COMMENT ON DATABASE "<name>" IS 'craftainer.dev/claim=<namespace>/<name>/<uid>'`
+  (`ROLE` for a role) to hand the object over.
 - Login passwords never reach the server in clear: the operator computes the
   SCRAM-SHA-256 verifier (RFC 5802; passwords are ASCII, for which SASLprep is
   the identity) and sends `ALTER ROLE ... PASSWORD 'SCRAM-SHA-256$...'`, which
@@ -94,6 +94,26 @@ always quoted with `pgx.Identifier`, and extension names must match
 - Deleting a `DatabaseRole` checks the ownership marker of its roles again
   before dropping them, so a role the claim did not create is refused
   (`ErrNotOwned`) whatever the caller believes.
+- Deleting a claim (`DEFAULT_DATA_DELETION_POLICY` and `deletionPolicy` apply
+  to what the claim owns, as before):
+  - A claim that never issued a create on the server (`status.externalId` is
+    empty) is released without contacting the server, which may be gone. A
+    claim stuck as `NameCollision` is such a claim.
+  - A claim that did issue one deletes only what is its own. A database whose
+    marker names another claim is skipped and the finalizer is released,
+    whatever the policy. For a `DatabaseRole`, a role of the set (the owner
+    role and the logins `_a` and `_b`) that is not the claim's makes the
+    whole set foreign: none of it is dropped and the claim is released, because
+    dropping the rest would need to know which part is ours. A server that
+    cannot be reached still keeps the finalizer for a claim that did issue a
+    create.
+  - "Issued a create" is `status.externalId`: `create-issued`, written before
+    `CREATE DATABASE` or the first role statement (withdrawn when the create
+    finds the object is somebody else's). A claim from before the record
+    existed has none, and deleting it releases the claim and leaves the object,
+    the safe reading when the status does not say it is ours. A reconcile gives
+    such a claim the record when the object carries its marker, so only a claim
+    deleted before its next reconcile is affected.
 - Known limits: a session the server closed costs one failed reconcile before
   the pool opens a new connection; objects an
   `Owner` role creates later are covered only at the next privilege change (see

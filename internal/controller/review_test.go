@@ -39,12 +39,16 @@ func TestDatabaseNeverAdoptsByNameAlone(t *testing.T) {
 	}
 	h.fake.wantNot(t, "CREATE", "ALTER", "COMMENT", "DROP")
 
+	// Deleting it leaves the database alone and releases the claim, without the
+	// server being contacted: the claim never issued a create.
 	h.must(env.Client.Delete(ctx, taken))
 	h.fake.reset()
 	h.reconcileOK(r, taken)
-	h.fake.wantNot(t, "DROP")
-	if h.gone(taken) {
-		t.Error("the claim was released although the database was not its own")
+	if h.fake.joined() != "" {
+		t.Errorf("the server was contacted:\n%s", h.fake.joined())
+	}
+	if !h.gone(taken) {
+		t.Error("the claim was kept over a database that is not its own")
 	}
 
 	// A claim whose status records the create takes it over.
@@ -134,12 +138,197 @@ func TestRoleNeverAdoptsAForeignLogin(t *testing.T) {
 		h.fake.wantNot(t, "CREATE", "ALTER", "GRANT", "COMMENT", "DROP")
 	}
 
+	// Deleting leaves the login alone and releases the claim, without the
+	// server being contacted: the claim never issued a create.
 	h.must(env.Client.Delete(ctx, role))
 	h.fake.reset()
 	h.reconcileOK(rr, role)
-	h.fake.wantNot(t, "DROP")
-	if h.gone(role) {
-		t.Error("the claim was released although the login was not its own")
+	if h.fake.joined() != "" {
+		t.Errorf("the server was contacted:\n%s", h.fake.joined())
+	}
+	if !h.gone(role) {
+		t.Error("the claim was kept over a login that is not its own")
+	}
+}
+
+// A claim that issued a create deletes only what is its own: a database with
+// another claim's marker is skipped and the claim is released, whatever the
+// policy.
+func TestDatabaseDeleteSkipsAForeignDatabase(t *testing.T) {
+	h := newHarness(t, common.DeletionDelete, nil)
+	r := &DatabaseReconciler{h.cfg}
+	db := h.database("swapped", nil)
+	h.reconcileOK(r, db)
+	h.get(db)
+	if db.Status.ExternalID != createIssued {
+		t.Fatalf("externalId = %q", db.Status.ExternalID)
+	}
+	h.fake.answer = existing("craftainer.dev/claim=other/db/uid", "-1")
+	h.must(env.Client.Delete(context.Background(), db))
+	h.fake.reset()
+	h.reconcileOK(r, db)
+	h.fake.wantNot(t, "DROP", "ALTER", "COMMENT")
+	if !h.gone(db) {
+		t.Error("the claim was kept over a database that is not its own")
+	}
+}
+
+// A claim whose status predates the create record, with a database that carries
+// its marker, is given the record, so that deleting it drops the database.
+func TestDatabaseRecordsTheCreateOfAnOlderStatus(t *testing.T) {
+	h := newHarness(t, common.DeletionDelete, nil)
+	r := &DatabaseReconciler{h.cfg}
+	db := h.database("older", nil)
+	h.reconcileOK(r, db)
+	h.get(db)
+	marker := "craftainer.dev/claim=" + h.ns + "/older/" + string(db.UID)
+	db.Status.ExternalID = ""
+	h.must(env.Client.Status().Update(context.Background(), db))
+	h.fake.answer = existing(marker, "-1")
+	h.reconcileOK(r, db)
+	h.get(db)
+	if db.Status.ExternalID != createIssued {
+		t.Errorf("externalId = %q, want the record", db.Status.ExternalID)
+	}
+	h.fake.reset()
+	h.must(env.Client.Delete(context.Background(), db))
+	h.reconcileOK(r, db)
+	h.fake.want(t, `DROP DATABASE IF EXISTS "`+pgclient.DatabaseName(h.ns, "older")+`"`)
+}
+
+// A role claim records the create before the first statement, and a claim that
+// issued one deletes only roles that are its own: a set that holds a role of
+// another claim is skipped as a whole and the claim is released.
+func TestRoleRecordsTheCreateAndSkipsForeignRolesOnDelete(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, common.DeletionRetain, nil)
+	dbr, rr := &DatabaseReconciler{h.cfg}, &RoleReconciler{h.cfg}
+	h.reconcileOK(dbr, h.database("orders", nil))
+	role := h.role("recorded", "orders", nil)
+	base := pgclient.RoleBase(h.ns, "recorded")
+	h.reconcileOK(rr, role)
+	h.get(role)
+	if role.Status.ExternalID != createIssued {
+		t.Fatalf("externalId = %q", role.Status.ExternalID)
+	}
+
+	// A login of another claim appeared since.
+	claim := h.ns + "/recorded/" + string(role.UID)
+	h.fake.answer = func(sql string) []pgclient.Row {
+		rows := roleAnswer(base, claim, "ReadWrite", "a", true, false)(sql)
+		if len(rows) == 3 {
+			rows[2]["comment"] = pgclient.Marker{Claim: "other/role/uid"}.String()
+		}
+		return rows
+	}
+	h.must(env.Client.Delete(ctx, role))
+	h.fake.reset()
+	h.reconcileOK(rr, role)
+	h.fake.wantNot(t, "DROP", "REASSIGN", "pg_terminate_backend", "ALTER", "COMMENT")
+	if !h.gone(role) {
+		t.Error("the claim was kept over a role that is not its own")
+	}
+}
+
+// A claim whose status predates the create record, with roles that carry its
+// marker, is given the record, so that deleting it drops them.
+func TestRoleRecordsTheCreateOfAnOlderStatus(t *testing.T) {
+	h := newHarness(t, common.DeletionRetain, nil)
+	dbr, rr := &DatabaseReconciler{h.cfg}, &RoleReconciler{h.cfg}
+	h.reconcileOK(dbr, h.database("orders", nil))
+	role := h.role("older", "orders", nil)
+	h.reconcileOK(rr, role)
+	h.get(role)
+	role.Status.ExternalID = ""
+	h.must(env.Client.Status().Update(context.Background(), role))
+	base := pgclient.RoleBase(h.ns, "older")
+	h.fake.answer = roleAnswer(base, h.ns+"/older/"+string(role.UID), "ReadWrite", "a", true, false)
+	h.reconcileOK(rr, role)
+	h.get(role)
+	if role.Status.ExternalID != createIssued {
+		t.Errorf("externalId = %q, want the record", role.Status.ExternalID)
+	}
+	h.fake.reset()
+	h.must(env.Client.Delete(context.Background(), role))
+	h.reconcileOK(rr, role)
+	h.fake.want(t, `DROP ROLE IF EXISTS`)
+}
+
+// A role made by somebody else between Observe and the create is refused
+// without anything being written, and the record of the create is withdrawn, so
+// that deleting the claim releases it without contacting the server. A status
+// write that fails stops the create before it is issued.
+func TestRoleCreateRacesWithAnotherCreator(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, common.DeletionRetain, nil)
+	dbr, rr := &DatabaseReconciler{h.cfg}, &RoleReconciler{h.cfg}
+	h.reconcileOK(dbr, h.database("orders", nil))
+	role := h.role("raced", "orders", nil)
+	base := pgclient.RoleBase(h.ns, "raced")
+
+	queries := 0
+	h.fake.answer = func(sql string) []pgclient.Row {
+		if !strings.Contains(sql, "FROM pg_roles") {
+			return nil
+		}
+		if queries++; queries == 1 {
+			return nil // Observe: nothing there
+		}
+		return []pgclient.Row{{"name": base, "login": "false", "connlimit": "-1", "comment": "craftainer.dev/claim=other/role/uid"}}
+	}
+	h.fake.reset()
+	if err := h.reconcile(rr, role); !errors.Is(err, pgclient.ErrNotOwned) {
+		t.Fatalf("create: %v", err)
+	}
+	h.get(role)
+	if role.Status.ExternalID != "" {
+		t.Errorf("externalId = %q, want it withdrawn", role.Status.ExternalID)
+	}
+	h.fake.wantNot(t, "CREATE ROLE", "ALTER ROLE", "COMMENT", "DROP")
+	h.must(env.Client.Delete(ctx, role))
+	h.fake.reset()
+	h.reconcileOK(rr, role)
+	if h.fake.joined() != "" || !h.gone(role) {
+		t.Errorf("the claim was not released without the server:\n%s", h.fake.joined())
+	}
+
+	// A failing status write stops before anything is created.
+	h.fake.answer = nil
+	other := h.role("unrecorded", "orders", nil)
+	wc, err := client.NewWithWatch(env.Config, client.Options{Scheme: env.Scheme})
+	h.must(err)
+	boom := errors.New("status write failed")
+	cfg := h.cfg
+	cfg.Client = interceptor.NewClient(wc, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if r, ok := obj.(*dbv1alpha1.DatabaseRole); ok && r.Status.ExternalID == createIssued {
+				return boom
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	h.fake.reset()
+	if err := h.reconcile(&RoleReconciler{cfg}, other); !errors.Is(err, boom) {
+		t.Errorf("status write: %v", err)
+	}
+	h.fake.wantNot(t, "CREATE ROLE")
+}
+
+// The External of a claim that never issued a create does nothing.
+func TestNothingMade(t *testing.T) {
+	ctx := context.Background()
+	n := nothingMade[dbv1alpha1.DatabaseSpec, pgclient.DatabaseState]{}
+	if obs, err := n.Observe(ctx, dbv1alpha1.DatabaseSpec{}); err != nil || obs.Exists {
+		t.Errorf("observe: %+v, %v", obs, err)
+	}
+	if d, err := n.Create(ctx, dbv1alpha1.DatabaseSpec{}); d != nil || err != nil {
+		t.Errorf("create: %v, %v", d, err)
+	}
+	if d, err := n.Update(ctx, dbv1alpha1.DatabaseSpec{}, pgclient.DatabaseState{}); d != nil || err != nil {
+		t.Errorf("update: %v, %v", d, err)
+	}
+	if err := n.Delete(ctx, pgclient.DatabaseState{}); err != nil {
+		t.Errorf("delete: %v", err)
 	}
 }
 

@@ -21,7 +21,11 @@ away from another tenant's objects:
 - the marker `craftainer.dev/claim=<namespace>/<name>/<uid>` is kept in
   `COMMENT ON DATABASE` and `COMMENT ON ROLE`; an object whose marker names
   another claim is never read, changed or deleted and the claim gets
-  `Synced=False`, reason `NameCollision`;
+  `Synced=False`, reason `NameCollision`. Deleting the claim leaves such an
+  object alone and releases the finalizer: a claim whose status records no
+  create is released without contacting the server, and one that does is
+  released over an object whose marker names another claim as if there were
+  none;
 - a cluster server serves only the namespaces its `allowedNamespaces`
   admits (`server.Resolve`), and a namespaced server only its own.
 
@@ -36,6 +40,9 @@ Plan row EB-3; [ADR 0002 of lib-operator-go](https://github.com/craftainer-labs/
 Unit and envtest suites, on every push: `TestNamesUseTheHashLengthOfADR0002`
 (`internal/pgclient`), `TestDatabaseLifecycleRetain` and
 `TestRoleLifecycleAndRotation` (collision leaves no statement),
+`TestDatabaseNeverAdoptsByNameAlone`, `TestDatabaseDeleteSkipsAForeignDatabase`
+and `TestRoleRecordsTheCreateAndSkipsForeignRolesOnDelete` (a foreign object is
+neither dropped nor does it hold the finalizer),
 `TestDatabaseWithoutAServerOrANamespace` (`NamespaceNotAllowed`),
 `TestRoleNeedsAUsableDatabase` (`internal/controller`). Whether the claim
 reaches only its own objects on a live server is checked by the PostgreSQL
