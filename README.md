@@ -132,7 +132,7 @@ promise from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind,
 wired in `internal/app`:
 
 - `status.serverVersion`: what `SHOW server_version` reports (at most 64 bytes);
-  `status.lastProbeTime`: the last probe whose result was recorded. It is
+  `status.lastProbeTime`: the last probe that ran and whose result was recorded (a server that cannot be probed, `InvalidServer`, has none). It is
   rewritten when the result changes and otherwise every 10 minutes, so a healthy
   fleet does not write one status per server per minute.
 - `Ready` and `ServerReachable` are `True` (reason `Available`) when the probe
