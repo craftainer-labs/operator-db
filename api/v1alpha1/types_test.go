@@ -11,6 +11,7 @@ import (
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
+	"github.com/craftainer-labs/lib-operator-go/pkg/probe"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 )
 
@@ -21,6 +22,8 @@ var (
 	_ lifecycle.Claim = (*DatabaseRole)(nil)
 	_ server.Server   = (*ClusterDatabaseServer)(nil)
 	_ server.Server   = (*DatabaseServer)(nil)
+	_ probe.Server    = (*ClusterDatabaseServer)(nil)
+	_ probe.Server    = (*DatabaseServer)(nil)
 )
 
 func TestAddToScheme(t *testing.T) {
@@ -57,6 +60,12 @@ func TestServerAccessors(t *testing.T) {
 	g.Expect(namespaced.GetCommon().ProxyURL).To(Equal("socks5://p:1080"))
 	g.Expect(namespaced.GetAllowedNamespaces()).To(BeNil())
 	g.Expect(namespaced.GetEndpoint()).To(Equal("[::1]:5433"))
+
+	// The probe writes through the pointer, into the kind's own status.
+	cluster.GetServerStatus().ServerVersion = "18.1"
+	g.Expect(cluster.Status.ServerVersion).To(Equal("18.1"))
+	namespaced.GetServerStatus().ServerVersion = "17.6"
+	g.Expect(namespaced.Status.ServerVersion).To(Equal("17.6"))
 }
 
 func TestDatabaseAccessors(t *testing.T) {

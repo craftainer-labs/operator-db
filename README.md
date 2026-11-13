@@ -123,8 +123,45 @@ always quoted with `pgx.Identifier`, and extension names must match
   the pool opens a new connection; objects an
   `Owner` role creates later are covered only at the next privilege change (see
   above).
-- Server health probing (`ClusterDatabaseServer` and `DatabaseServer` status) is
-  not in yet.
+- Server health is in "Server health" below.
+
+### Server health
+
+`ClusterDatabaseServer` and `DatabaseServer` get the `ServerStatus` their CRDs
+promise from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind,
+wired in `internal/app`:
+
+- `status.serverVersion`: what `SHOW server_version` reports (at most 64 bytes);
+  `status.lastProbeTime`: the last probe that ran and whose result was recorded
+  (a server that cannot be probed, `InvalidServer`, has none). It is rewritten
+  when the result changes and otherwise every 10 minutes, so a healthy fleet does
+  not write one status per server per minute.
+- `Ready` and `ServerReachable` are `True` (reason `Available`) when the probe
+  connected and read the version, and `False` with reason `ServerUnreachable`
+  when it did not. A server whose admin Secret is in a forbidden namespace is
+  `AdminSecretNamespaceForbidden`; one whose connection settings are missing or
+  invalid (an absent Secret or CA ConfigMap, a bad proxy URL, no usable
+  `username` and `password`) is `Ready=False` with `ServerReachable=Unknown` and
+  reason `InvalidServer`. The status never shows why a connection failed; the
+  operator log has the category (policy, TLS, authentication, timeout, other),
+  once per change.
+- A probe runs every `spec.healthCheckInterval` (default one minute, plus up to
+  10% jitter), whether the last one succeeded or not; a server is also probed at
+  once when it is created or its spec changes. A probe is bounded to 30 seconds.
+- The probe connects exactly as the claims do: the egress policy, the server's
+  TLS settings (verify-full, its CA bundle, `tls.serverName`, minimum version)
+  and proxy, as the admin user, to the admin database. It opens one connection
+  for the probe and closes it. Credentials are never in an error or a log.
+- RBAC: `get`, `list` and `watch` on Secrets and ConfigMaps, and `get`, `patch`
+  on the servers' `status`, in the chart role.
+- Caches: the manager's Secret and ConfigMap caches keep only the objects with
+  the `managed-by` label (so the operator does not hold every Secret or ConfigMap
+  in memory), and the probe reads the admin Secret and the CA bundle live, not
+  from the cache, so every probe sees the current object. A change to an
+  unlabelled admin Secret, CA Secret or CA ConfigMap does not trigger a probe at
+  once; it is picked up at the next probe interval (one minute by default). Do
+  not widen either cache for that: it costs memory and widens exposure for a
+  latency gain of at most one interval.
 
 Configuration, as flags with environment defaults:
 

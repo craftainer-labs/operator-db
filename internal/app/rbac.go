@@ -15,9 +15,12 @@ package app
 // ClusterRole rule, not only a Role in the operator namespace) and the binding
 // Secrets are written; the manager's cache of Secrets is restricted to its
 // managed-by label (binding.CacheByObject), and reads of unlabelled Secrets go
-// to the API server. ConfigMaps: CA bundles only. Events: the Event recorder.
+// to the API server. The server probes (probe.Reconciler) also watch Secrets
+// and ConfigMaps, so those need list and watch too (the ConfigMap cache is
+// restricted to the managed-by label like the Secret cache). ConfigMaps: CA
+// bundles only. Events: the Event recorder.
 
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core;events.k8s.io,resources=events,verbs=create;patch

@@ -101,13 +101,9 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, err)
 	}
-	user, pass := conn.Admin[AdminUsernameKey], conn.Admin[AdminPasswordKey]
-	if len(user) == 0 || len(pass) == 0 {
-		return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrAdminCredentials)
-	}
-	target := pgclient.Target{
-		Host: spec.Host, Port: portOf(spec.Port), Database: spec.AdminDatabase, User: string(user), Password: string(pass),
-		ServerName: conn.ServerName, CABundle: conn.CABundle, MinTLS: conn.MinTLSVersion, Dial: dial,
+	target, err := adminTarget(spec, conn, dial)
+	if err != nil {
+		return nil, err
 	}
 	// Without a cache nobody would close a pool, so every session is opened
 	// (and closed) on its own.
@@ -121,6 +117,19 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 		}
 	}
 	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, recorder: c.Recorder, spec: spec, conn: conn}, nil
+}
+
+// adminTarget is the connection to a server's admin database: its host, port
+// and admin database, the admin credentials of conn, and the TLS settings.
+func adminTarget(spec dbv1alpha1.PostgreSQL, conn server.Connection, dial egress.DialFunc) (pgclient.Target, error) {
+	user, pass := conn.Admin[AdminUsernameKey], conn.Admin[AdminPasswordKey]
+	if len(user) == 0 || len(pass) == 0 {
+		return pgclient.Target{}, fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrAdminCredentials)
+	}
+	return pgclient.Target{
+		Host: spec.Host, Port: portOf(spec.Port), Database: spec.AdminDatabase, User: string(user), Password: string(pass),
+		ServerName: conn.ServerName, CABundle: conn.CABundle, MinTLS: conn.MinTLSVersion, Dial: dial,
+	}, nil
 }
 
 // serverObject is the server a claim names, as much of it as the controllers
