@@ -33,9 +33,16 @@ func TestPolicyCheck(t *testing.T) {
 		"0.0.0.0", "127.0.0.1", "127.255.255.254", "169.254.169.254", "169.254.0.1", "224.0.0.1", "255.255.255.255",
 		"::", "::1", "fe80::1", "ff02::1", "fd00:ec2::254", "100.100.100.200", "::ffff:127.0.0.1", "::ffff:169.254.169.254",
 		"fe80::1%eth0",
+		"192.0.0.192", "192.0.0.1", "198.18.0.1", "198.19.255.255", "168.63.129.16",
+		// IPv4 carried by IPv6 transition addresses (a gateway reaches it):
+		// NAT64 well-known and local-use prefixes, 6to4 and Teredo, all
+		// carrying 169.254.169.254.
+		"64:ff9b::a9fe:a9fe", "64:ff9b:1:a9fe:a9:fe00::", "2002:a9fe:a9fe::1", "2001:0:4136:e378:8000:63bf:5601:5601",
 	}
-	private := []string{"10.0.0.1", "10.255.255.255", "172.16.0.1", "172.31.255.255", "192.168.1.1", "100.64.0.1", "fc00::1", "fd12:3456::1", "::ffff:10.1.2.3"}
-	public := []string{"8.8.8.8", "1.1.1.1", "172.15.255.255", "172.32.0.1", "192.169.0.1", "100.63.255.255", "100.128.0.1", "2001:db8::1", "2606:4700::1111", "11.0.0.1"}
+	private := []string{"10.0.0.1", "10.255.255.255", "172.16.0.1", "172.31.255.255", "192.168.1.1", "100.64.0.1", "fc00::1", "fd12:3456::1", "::ffff:10.1.2.3",
+		"64:ff9b::a01:203", "64:ff9b:1:a01:2:300::", "2002:a01:203::1", "2001:0:4136:e378:8000:63bf:f5fe:fdfc"}
+	public := []string{"8.8.8.8", "1.1.1.1", "172.15.255.255", "172.32.0.1", "192.169.0.1", "100.63.255.255", "100.128.0.1", "2001:db8::1", "2606:4700::1111", "11.0.0.1",
+		"64:ff9b::808:808", "2002:808:808::1", "2001:0:4136:e378:8000:63bf:f7f7:f7f7", "198.17.255.255", "198.20.0.0", "192.0.1.1"}
 
 	strict, allow := NewPolicy(ModeStrict), NewPolicy(ModeAllowPrivate)
 	for _, s := range always {
@@ -137,8 +144,8 @@ func TestSOCKS5ChecksTheDestination(t *testing.T) {
 
 func TestCheckTarget(t *testing.T) {
 	p := NewPolicy(ModeStrict)
-	if err := p.checkTarget("pg.example.com:5432"); err != nil {
-		t.Errorf("a host name is left to the proxy: %v", err)
+	if err := p.checkTarget("pg.example.com:5432"); !errors.Is(err, ErrBlocked) {
+		t.Errorf("a host name must fail closed: %v", err)
 	}
 	if err := p.checkTarget("10.1.2.3:5432"); !errors.Is(err, ErrBlocked) {
 		t.Errorf("private IP: %v", err)
@@ -289,6 +296,21 @@ func TestProxyFailures(t *testing.T) {
 		dial, _ = Policy{}.Dialer(down)
 		if _, err := dial(ctx, "tcp", "10.9.9.9:5432"); err == nil {
 			t.Errorf("%s proxy that is down: no error", scheme)
+		}
+	}
+}
+
+func TestProxyAddrDefaultPorts(t *testing.T) {
+	for raw, want := range map[string]string{
+		"http://proxy.corp": "proxy.corp:80", "https://proxy.corp": "proxy.corp:443", "socks5://proxy.corp": "proxy.corp:1080",
+		"http://proxy.corp:3128": "proxy.corp:3128", "socks5://[2001:db8::1]": "[2001:db8::1]:1080",
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := proxyAddr(u); got != want {
+			t.Errorf("proxyAddr(%s) = %s, want %s", raw, got, want)
 		}
 	}
 }

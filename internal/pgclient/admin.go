@@ -2,15 +2,20 @@ package pgclient
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
+
+	"github.com/craftainer-labs/operator-db/internal/egress"
 )
 
 var (
@@ -19,7 +24,53 @@ var (
 	ErrNoDatabase = errors.New("database does not exist")
 	// ErrInvalidPrivileges means a DatabaseRole asked for unknown privileges.
 	ErrInvalidPrivileges = errors.New("invalid privileges")
+	// ErrNotOwned means a role of a DatabaseRole exists and its ownership
+	// marker does not name the claim: the operator never touches it.
+	ErrNotOwned = errors.New("role belongs to another claim or is not managed by this operator")
 )
+
+// The categories of a failed connection. A condition and an Event carry the
+// error text to the tenant, and a tenant can aim a namespaced DatabaseServer at
+// any host, so they carry only one of these fixed texts: never an address, a
+// resolved name or the raw error, which would turn the operator into a port
+// scanner and a resolver. The raw error goes to the operator log.
+var (
+	ErrConnPolicy  = errors.New("connection refused by the egress policy")
+	ErrConnTLS     = errors.New("TLS handshake failed")
+	ErrConnAuth    = errors.New("authentication failed")
+	ErrConnTimeout = errors.New("connection timed out")
+	ErrConnFailed  = errors.New("connection failed")
+)
+
+// connError is lifecycle.ErrUnreachable with a category as its text. It still
+// unwraps to the cause, for errors.Is, but Error never shows it.
+type connError struct{ category, cause error }
+
+func (e *connError) Error() string {
+	return lifecycle.ErrUnreachable.Error() + ": " + e.category.Error()
+}
+
+func (e *connError) Unwrap() []error {
+	return []error{lifecycle.ErrUnreachable, e.category, e.cause}
+}
+
+// classify maps a connection failure to its category.
+func classify(err error) error {
+	var pgErr *pgconn.PgError
+	var verify *tls.CertificateVerificationError
+	var netErr net.Error
+	switch {
+	case errors.Is(err, egress.ErrBlocked):
+		return ErrConnPolicy
+	case errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "28"):
+		return ErrConnAuth
+	case errors.As(err, &verify) || strings.Contains(strings.ToLower(err.Error()), "tls"):
+		return ErrConnTLS
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
+		return ErrConnTimeout
+	}
+	return ErrConnFailed
+}
 
 // sqlStateInvalidCatalog is SQLSTATE 3D000, invalid_catalog_name.
 const sqlStateInvalidCatalog = "3D000"
@@ -32,7 +83,8 @@ type OpenFunc func(ctx context.Context, database string) (Session, error)
 type Admin struct{ Open OpenFunc }
 
 // open wraps a connection failure in lifecycle.ErrUnreachable, so Reconcile
-// reports ServerReachable=False, except for a missing database.
+// reports ServerReachable=False, except for a missing database. The text of
+// the wrapper is one of the Err Conn categories; the raw error is logged.
 func (a Admin) open(ctx context.Context, database string) (Session, error) {
 	s, err := a.Open(ctx, database)
 	if err == nil {
@@ -42,7 +94,8 @@ func (a Admin) open(ctx context.Context, database string) (Session, error) {
 	if errors.As(err, &pgErr) && pgErr.Code == sqlStateInvalidCatalog {
 		return nil, fmt.Errorf("%w: %q", ErrNoDatabase, database)
 	}
-	return nil, fmt.Errorf("%w: %w", lifecycle.ErrUnreachable, err)
+	log.FromContext(ctx).Error(err, "cannot connect to the backend", "database", database)
+	return nil, &connError{category: classify(err), cause: err}
 }
 
 // with runs f on a session on database and closes it.
@@ -179,6 +232,9 @@ type RoleInfo struct {
 	Exists    bool
 	Login     bool
 	ConnLimit int32
+	// Marker is the ownership marker in the role's comment; the zero Marker
+	// when it has none.
+	Marker Marker
 }
 
 // RoleState is the owner role and both logins of a DatabaseRole.
@@ -204,10 +260,10 @@ func (a Admin) Role(ctx context.Context, base string) (RoleState, error) {
 			"coalesce(shobj_description(oid, 'pg_authid'), '') AS comment FROM pg_roles WHERE rolname IN ("+
 			strings.Join(names, ", ")+")")
 		for _, r := range rows {
-			info := RoleInfo{Exists: true, Login: r["login"] == "true", ConnLimit: atoi(r["connlimit"])}
+			info := RoleInfo{Exists: true, Login: r["login"] == "true", ConnLimit: atoi(r["connlimit"]), Marker: ParseMarker(r["comment"])}
 			switch r["name"] {
 			case base:
-				st.Base, st.Marker = info, ParseMarker(r["comment"])
+				st.Base, st.Marker = info, info.Marker
 			case LoginName(base, GenA):
 				st.A = info
 			case LoginName(base, GenB):
@@ -239,9 +295,16 @@ const (
 
 // ApplyRole creates what is missing and makes the rest match: the NOLOGIN
 // owner role, both logins as its members with SET ROLE to it, the active
-// login's password, the marker and the privileges on the database. The other
-// login keeps its state, because it may be the previous generation of a
+// login's password, the privileges on the database and, last, the marker. The
+// other login keeps its state, because it may be the previous generation of a
 // rotation.
+//
+// A role is created together with its ownership marker (a COMMENT with the
+// claim only) in one multi-statement query, which PostgreSQL runs as one
+// transaction, so a role without a marker is never ours. An existing role
+// whose marker names another claim is refused. The full marker, privileges and
+// active login included, is written after the grants, so it never records
+// privileges that were not applied.
 func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 	grants, err := privilegeStatements(p.Base, p.Privileges)
 	if err != nil {
@@ -251,15 +314,27 @@ func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 	if err != nil {
 		return err
 	}
+	for _, r := range []struct {
+		name string
+		info RoleInfo
+	}{{p.Base, st.Base}, {LoginName(p.Base, GenA), st.A}, {LoginName(p.Base, GenB), st.B}} {
+		if r.info.Exists && r.info.Marker.Claim != p.Marker.Claim {
+			return fmt.Errorf("%w: %q", ErrNotOwned, r.name)
+		}
+	}
+	owned := Marker{Claim: p.Marker.Claim}
+	create := func(name string) string {
+		return "CREATE ROLE " + Ident(name) + " NOLOGIN; " + commentOn("ROLE", name, owned)
+	}
 	base, db, limit := Ident(p.Base), Ident(p.Database), strconv.Itoa(int(p.ConnLimit))
 	var stmts []string
 	if !st.Base.Exists {
-		stmts = append(stmts, "CREATE ROLE "+base+" NOLOGIN")
+		stmts = append(stmts, create(p.Base))
 	}
 	for _, gen := range []string{GenA, GenB} {
 		login := Ident(LoginName(p.Base, gen))
 		if !st.Login(gen).Exists {
-			stmts = append(stmts, "CREATE ROLE "+login+" NOLOGIN")
+			stmts = append(stmts, create(LoginName(p.Base, gen)))
 		}
 		alter := "ALTER ROLE " + login + " WITH CONNECTION LIMIT " + limit
 		if gen == p.Marker.Active {
@@ -271,12 +346,14 @@ func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 	if p.Privileges == Owner {
 		access = "ALL"
 	}
-	stmts = append(stmts, commentOn("ROLE", p.Base, p.Marker),
-		"REVOKE ALL ON DATABASE "+db+" FROM "+base, "GRANT "+access+" ON DATABASE "+db+" TO "+base)
+	stmts = append(stmts, "REVOKE ALL ON DATABASE "+db+" FROM "+base, "GRANT "+access+" ON DATABASE "+db+" TO "+base)
 	if err := a.with(ctx, "", func(s Session) error { return execAll(ctx, s, stmts) }); err != nil {
 		return err
 	}
-	return a.with(ctx, p.Database, func(s Session) error { return execAll(ctx, s, grants) })
+	if err := a.with(ctx, p.Database, func(s Session) error { return execAll(ctx, s, grants) }); err != nil {
+		return err
+	}
+	return a.with(ctx, "", func(s Session) error { return s.Exec(ctx, commentOn("ROLE", p.Base, p.Marker)) })
 }
 
 // privilegeStatements revoke and then grant the access of a privilege level on
@@ -308,18 +385,6 @@ func privilegeStatements(base, privileges string) ([]string, error) {
 		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT " + tables + " ON TABLES TO " + r,
 		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT " + seqs + " ON SEQUENCES TO " + r,
 	}, nil
-}
-
-// Activate makes gen the active login: it gets the password and the marker
-// records it. The other login stays valid until Retire.
-func (a Admin) Activate(ctx context.Context, base, gen, password string, m Marker) error {
-	m.Active = gen
-	return a.with(ctx, "", func(s Session) error {
-		return execAll(ctx, s, []string{
-			"ALTER ROLE " + Ident(LoginName(base, gen)) + " WITH LOGIN PASSWORD " + Literal(password),
-			commentOn("ROLE", base, m),
-		})
-	})
 }
 
 // Retire disables the login of gen and clears its password. It succeeds when

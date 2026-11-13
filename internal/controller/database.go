@@ -20,6 +20,19 @@ import (
 // allowedExtensions does not list.
 var ErrExtensionNotAllowed = errors.New("extension is not in the server's allowedExtensions")
 
+// ErrExistsUnmanaged means a database with the claim's name exists and nothing
+// shows that this claim created it: it has no ownership marker and the claim's
+// status does not record a create. The operator never adopts or drops it. The
+// README says how to resolve it.
+var ErrExistsUnmanaged = errors.New("database exists and is not managed by this operator")
+
+// createIssued is written to status.externalId before CREATE DATABASE runs. It
+// records that this claim issued the create, so a database that has no marker
+// because the operator stopped between CREATE DATABASE and COMMENT ON DATABASE
+// (which cannot share a transaction) is taken over, and one that someone else
+// made is not.
+const createIssued = "create-issued"
+
 // DatabaseReconciler reconciles Database claims (a data kind).
 type DatabaseReconciler struct{ Config }
 
@@ -38,7 +51,9 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var ext lifecycle.External[dbv1alpha1.DatabaseSpec, pgclient.DatabaseState]
 	if err == nil {
 		opts.ServerHost = be.spec.Host
-		ext = newDatabaseExternal(be, &db)
+		x := newDatabaseExternal(be, &db)
+		x.persist = func(ctx context.Context) error { return r.Client.Status().Update(ctx, &db) }
+		ext = x
 	}
 	return lifecycle.Reconcile(ctx, r.Client, &db, db.Spec, ext, opts)
 }
@@ -58,6 +73,9 @@ type databaseExternal struct {
 	claim  *dbv1alpha1.Database
 	name   string
 	marker pgclient.Marker
+	// persist writes the claim's status now, instead of at the end of the
+	// reconcile.
+	persist func(context.Context) error
 }
 
 func newDatabaseExternal(be *backend, claim *dbv1alpha1.Database) *databaseExternal {
@@ -94,8 +112,9 @@ func (e *databaseExternal) params(spec dbv1alpha1.DatabaseSpec) pgclient.Databas
 }
 
 // Observe implements lifecycle.External. A database whose marker names another
-// claim is refused; one with no marker is a Create that stopped before it
-// stamped the marker, and is taken over by Update.
+// claim is refused. One with no marker is taken over by Update only when the
+// claim's status records that it issued the create (a Create that stopped
+// before it stamped the marker); otherwise it is refused as unmanaged.
 func (e *databaseExternal) Observe(ctx context.Context, spec dbv1alpha1.DatabaseSpec) (lifecycle.Observation[pgclient.DatabaseState], error) {
 	e.claim.SetExternalName(e.name) // see roleExternal.Observe
 	st, err := e.be.admin.Database(ctx, e.name)
@@ -106,6 +125,10 @@ func (e *databaseExternal) Observe(ctx context.Context, spec dbv1alpha1.Database
 		return lifecycle.Observation[pgclient.DatabaseState]{},
 			fmt.Errorf("%w: database %q belongs to another claim", lifecycle.ErrNameCollision, e.name)
 	}
+	if st.Marker.Claim == "" && e.claim.GetExternalID() != createIssued {
+		return lifecycle.Observation[pgclient.DatabaseState]{},
+			fmt.Errorf("%w: %w: %q", lifecycle.ErrNameCollision, ErrExistsUnmanaged, e.name)
+	}
 	missing := slices.ContainsFunc(spec.Extensions, func(x string) bool { return !slices.Contains(st.Extensions, x) })
 	upToDate := st.Marker.Claim == e.marker.Claim && st.ConnLimit == connLimit(spec.ConnectionLimit) && !missing
 	return lifecycle.Observation[pgclient.DatabaseState]{Exists: true, UpToDate: upToDate, Current: st}, nil
@@ -114,6 +137,11 @@ func (e *databaseExternal) Observe(ctx context.Context, spec dbv1alpha1.Database
 // Create implements lifecycle.External; a data kind has no binding data.
 func (e *databaseExternal) Create(ctx context.Context, spec dbv1alpha1.DatabaseSpec) (binding.Data, error) {
 	if err := e.checkExtensions(spec); err != nil {
+		return nil, err
+	}
+	// Record the intent before the create, so a crash after it is recognised.
+	e.claim.SetExternalID(createIssued)
+	if err := e.persist(ctx); err != nil {
 		return nil, err
 	}
 	return nil, e.be.admin.CreateDatabase(ctx, e.params(spec))

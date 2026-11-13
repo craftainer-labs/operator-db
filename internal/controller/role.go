@@ -44,8 +44,15 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err == nil {
 		opts.ServerHost = be.spec.Host
 		x := newRoleExternal(be, &role)
+		// The database is the one the Database claim names in its status, not
+		// one derived again here. Deleting a role does not need the Database
+		// (it may be gone first), so a failure only counts when not deleting.
+		name, derr := r.checkDatabase(ctx, &role)
+		if name != "" {
+			x.database = name
+		}
 		if role.DeletionTimestamp.IsZero() {
-			x.pre = r.checkDatabase(ctx, &role)
+			x.pre = derr
 		}
 		ext = x
 	}
@@ -53,21 +60,22 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 }
 
 // checkDatabase makes sure the Database exists in the claim's namespace on the
-// same server: a role is for one database of the server it names.
-func (r *RoleReconciler) checkDatabase(ctx context.Context, role *dbv1alpha1.DatabaseRole) error {
+// same server: a role is for one database of the server it names. It returns
+// the database's status.externalName, "" while the Database has none yet.
+func (r *RoleReconciler) checkDatabase(ctx context.Context, role *dbv1alpha1.DatabaseRole) (string, error) {
 	var db dbv1alpha1.Database
 	key := client.ObjectKey{Namespace: role.Namespace, Name: role.Spec.DatabaseRef.Name}
 	if err := r.Client.Get(ctx, key, &db); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("%w: Database %q not found", ErrDatabaseNotUsable, key.Name)
+			return "", fmt.Errorf("%w: Database %q not found", ErrDatabaseNotUsable, key.Name)
 		}
-		return err
+		return "", err
 	}
 	if db.Spec.ServerRef != role.Spec.ServerRef {
-		return fmt.Errorf("%w: Database %q is on %s %q, not on %s %q", ErrDatabaseNotUsable, key.Name,
+		return "", fmt.Errorf("%w: Database %q is on %s %q, not on %s %q", ErrDatabaseNotUsable, key.Name,
 			db.Spec.ServerRef.Kind, db.Spec.ServerRef.Name, role.Spec.ServerRef.Kind, role.Spec.ServerRef.Name)
 	}
-	return nil
+	return db.GetExternalName(), nil
 }
 
 // SetupWithManager registers the controller; it also watches the binding
@@ -135,11 +143,22 @@ func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpe
 		return none, e.pre
 	}
 	st, err := e.be.admin.Role(ctx, e.base)
-	if err != nil || !st.Base.Exists {
+	if err != nil {
 		return none, err
 	}
-	if st.Marker.Claim != "" && st.Marker.Claim != e.id {
-		return none, fmt.Errorf("%w: role %q belongs to another claim", lifecycle.ErrNameCollision, e.base)
+	// A role is created together with its marker, so one that exists without
+	// ours is not ours, whichever of the three it is.
+	for _, r := range []struct {
+		name string
+		info pgclient.RoleInfo
+	}{{e.base, st.Base}, {pgclient.LoginName(e.base, pgclient.GenA), st.A}, {pgclient.LoginName(e.base, pgclient.GenB), st.B}} {
+		if r.info.Exists && r.info.Marker.Claim != e.id {
+			return none, fmt.Errorf("%w: role %q belongs to another claim or is not managed by this operator",
+				lifecycle.ErrNameCollision, r.name)
+		}
+	}
+	if !st.Base.Exists {
+		return none, nil
 	}
 	upToDate := st.Marker.Claim == e.id && st.Marker.Privileges == e.privileges && !st.Base.Login &&
 		st.A.Exists && st.B.Exists && st.A.ConnLimit == e.limit && st.B.ConnLimit == e.limit &&
@@ -183,11 +202,14 @@ func (e *roleExternal) Delete(ctx context.Context, _ pgclient.RoleState) error {
 // is the same login on a retry, whatever crashed before.
 func (e *roleExternal) RotateBegin(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec, _ pgclient.RoleState, st lifecycle.RotationState) (binding.Data, lifecycle.Generation, error) {
 	next := pgclient.OtherGen(string(st.Active))
-	pw := rand.Text() + rand.Text()
-	if err := e.be.admin.Activate(ctx, e.base, next, pw, e.marker(next)); err != nil {
+	// The same call as Create and Update, with the new login active: it also
+	// applies the privileges, so the marker it writes names privileges that
+	// were applied.
+	data, err := e.issue(ctx, next)
+	if err != nil {
 		return nil, "", err
 	}
-	return e.data(next, pw), lifecycle.Generation(next), nil
+	return data, lifecycle.Generation(next), nil
 }
 
 // RotateFinish implements lifecycle.Rotator. st.Previous is empty during the

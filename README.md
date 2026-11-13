@@ -51,6 +51,23 @@ always quoted with `pgx.Identifier`, and extension names must match
   covered at that role's next privilege change. An update of the role (a changed
   `privileges` or `connectionLimit`, or drift) issues the active login a new
   password and rewrites the binding Secret.
+- The operator only manages what it can show it created. Every role is created
+  together with its ownership marker, and `Database` records in
+  `status.externalId` that it issued the create before `CREATE DATABASE` runs
+  (that statement cannot share a transaction with `COMMENT ON DATABASE`). A
+  database or role that exists without a marker of the claim is reported as a
+  `NameCollision` condition ("database exists and is not managed by this
+  operator" or "belongs to another claim") and is never changed or dropped.
+  The claim cannot be deleted while it is in that state, because the operator
+  must look at the object first. To resolve it, either rename the claim, or
+  `COMMENT ON DATABASE "<name>" IS 'craftainer.dev/claim=<namespace>/<name>/<uid>'`
+  (`ROLE` for a role) to hand the object over, or set `spec.deletionPolicy:
+  Retain` (a `Database`) so that deleting the claim leaves the object alone.
+- Known limits, both for NO2b-2 (they need a real PostgreSQL to verify): login
+  passwords are sent as `ALTER ROLE ... PASSWORD '<literal>'` in clear text, not
+  as a client-side SCRAM verifier, so the server's statement logging must stay
+  off for them ([NFR-0004](docs/nfrs/NFR-0004-least-privilege-and-no-credentials-in-output.md));
+  and retiring a login does not end its open sessions.
 - Server health probing (`ClusterDatabaseServer` and `DatabaseServer` status) is
   not in yet.
 

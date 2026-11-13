@@ -35,8 +35,8 @@ func roleAnswer(base, claim, privileges, active string, aLogin, bLogin bool) fun
 		return []pgclient.Row{
 			{"name": base, "login": "false", "connlimit": "-1",
 				"comment": pgclient.Marker{Claim: claim, Privileges: privileges, Active: active}.String()},
-			{"name": base + "_a", "login": b(aLogin), "connlimit": "-1"},
-			{"name": base + "_b", "login": b(bLogin), "connlimit": "-1"},
+			{"name": base + "_a", "login": b(aLogin), "connlimit": "-1", "comment": pgclient.Marker{Claim: claim}.String()},
+			{"name": base + "_b", "login": b(bLogin), "connlimit": "-1", "comment": pgclient.Marker{Claim: claim}.String()},
 		}
 	}
 }

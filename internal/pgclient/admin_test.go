@@ -2,7 +2,10 @@ package pgclient
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
+
+	"github.com/craftainer-labs/operator-db/internal/egress"
 )
 
 var errBoom = errors.New("boom")
@@ -212,8 +217,8 @@ func roleRows(base string, login bool) []scripted {
 	}
 	return []scripted{{"FROM pg_roles", []Row{
 		{"name": base, "login": "false", "connlimit": "-1", "comment": "craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite active=a"},
-		{"name": base + "_a", "login": l, "connlimit": "2"},
-		{"name": base + "_b", "login": "false", "connlimit": "-1"},
+		{"name": base + "_a", "login": l, "connlimit": "2", "comment": "craftainer.dev/claim=team-a/app/uid-1"},
+		{"name": base + "_b", "login": "false", "connlimit": "-1", "comment": "craftainer.dev/claim=team-a/app/uid-1"},
 		{"name": "unrelated", "login": "false", "connlimit": "-1"},
 	}}}
 }
@@ -230,6 +235,9 @@ func TestRoleObserve(t *testing.T) {
 	}
 	if st.Marker != (Marker{Claim: "team-a/app/uid-1", Privileges: "ReadWrite", Active: "a"}) {
 		t.Errorf("marker = %+v", st.Marker)
+	}
+	if st.A.Marker.Claim != "team-a/app/uid-1" || st.B.Marker.Claim != "team-a/app/uid-1" || st.Base.Marker != st.Marker {
+		t.Errorf("login markers = %+v, %+v", st.A.Marker, st.B.Marker)
 	}
 	if st.Login(GenA) != st.A || st.Login(GenB) != st.B {
 		t.Error("Login picks the wrong role")
@@ -261,6 +269,9 @@ func TestApplyRole(t *testing.T) {
 		`|CREATE ROLE "team-a_app_x" NOLOGIN`,
 		`|CREATE ROLE "team-a_app_x_a" NOLOGIN`,
 		`|CREATE ROLE "team-a_app_x_b" NOLOGIN`,
+		// Every role is created with its ownership marker in the same query.
+		`|CREATE ROLE "team-a_app_x" NOLOGIN; COMMENT ON ROLE "team-a_app_x" IS 'craftainer.dev/claim=team-a/app/uid-1'`,
+		`|CREATE ROLE "team-a_app_x_a" NOLOGIN; COMMENT ON ROLE "team-a_app_x_a" IS 'craftainer.dev/claim=team-a/app/uid-1'`,
 		`|ALTER ROLE "team-a_app_x_a" WITH LOGIN PASSWORD 'p''w' CONNECTION LIMIT 7`,
 		`|ALTER ROLE "team-a_app_x_b" WITH CONNECTION LIMIT 7`,
 		`|GRANT "team-a_app_x" TO "team-a_app_x_a"`,
@@ -307,15 +318,9 @@ func TestApplyRole(t *testing.T) {
 	}
 }
 
-func TestActivateAndRetire(t *testing.T) {
+func TestRetire(t *testing.T) {
 	ctx := context.Background()
-	f := &fakePG{}
-	if err := f.admin().Activate(ctx, "r", GenB, "pw", Marker{Claim: "c", Privileges: ReadOnly, Active: GenA}); err != nil {
-		t.Fatal(err)
-	}
-	f.want(t, `|ALTER ROLE "r_b" WITH LOGIN PASSWORD 'pw'`, `COMMENT ON ROLE "r" IS 'craftainer.dev/claim=c privileges=ReadOnly active=b'`)
-
-	f = &fakePG{rows: roleRows("r", true)}
+	f := &fakePG{rows: roleRows("r", true)}
 	if err := f.admin().Retire(ctx, "r", GenA); err != nil {
 		t.Fatal(err)
 	}
@@ -333,35 +338,70 @@ func TestActivateAndRetire(t *testing.T) {
 	}
 }
 
-func TestDropRole(t *testing.T) {
+// The marker is written after the grants, and a role that is not ours is
+// refused, whichever of the three it is.
+func TestApplyRoleOrderAndOwnership(t *testing.T) {
 	ctx := context.Background()
-	f := &fakePG{rows: roleRows("r", true)}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil {
+	p := RoleParams{
+		Base: "r", Database: "db", Marker: Marker{Claim: "team-a/app/uid-1", Privileges: ReadOnly, Active: GenA},
+		ConnLimit: -1, Password: "pw", Privileges: ReadOnly,
+	}
+	f := &fakePG{}
+	if err := f.admin().ApplyRole(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	f.want(t,
-		`pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('r', 'r_a', 'r_b')`,
-		`db|REASSIGN OWNED BY "r", "r_a", "r_b" TO CURRENT_USER`,
-		`db|DROP OWNED BY "r", "r_a", "r_b"`,
-		`|DROP ROLE IF EXISTS "r", "r_a", "r_b"`)
-
-	// Nothing left to drop.
-	f = &fakePG{}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil || len(f.stmts) != 1 {
-		t.Errorf("empty drop: %v, %v", err, f.stmts)
+	final := `|COMMENT ON ROLE "r" IS 'craftainer.dev/claim=team-a/app/uid-1 privileges=ReadOnly active=a'`
+	grant := `db|GRANT USAGE ON SCHEMA public TO "r"`
+	if last := f.stmts[len(f.stmts)-1]; last != final {
+		t.Errorf("the marker is not written last: %v", f.stmts)
+	}
+	if strings.Index(f.joined(), grant) > strings.LastIndex(f.joined(), final) {
+		t.Errorf("the marker precedes the grants:\n%s", f.joined())
 	}
 
-	// The database is gone: its owned objects went with it.
-	f = &fakePG{rows: roleRows("r", true), openErr: map[string]error{"db": &pgconn.PgError{Code: "3D000"}}}
-	if err := f.admin().DropRole(ctx, "r", "db"); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"r", "r_a", "r_b"} {
+		rows := roleRows("r", true)
+		for _, row := range rows[0].rows {
+			if row["name"] == name {
+				row["comment"] = "someone/else/uid"
+				if name != "r" {
+					row["comment"] = ""
+				}
+			}
+		}
+		f = &fakePG{rows: rows}
+		if err := f.admin().ApplyRole(ctx, p); !errors.Is(err, ErrNotOwned) {
+			t.Errorf("%s: %v", name, err)
+		}
+		f.wantNot(t, "CREATE", "ALTER", "GRANT", "COMMENT")
 	}
-	f.want(t, `DROP ROLE IF EXISTS`)
+}
 
-	for _, fail := range []string{"pg_roles", "pg_terminate_backend", "REASSIGN OWNED", "DROP ROLE"} {
-		f = &fakePG{rows: roleRows("r", true), failOn: fail}
-		if err := f.admin().DropRole(ctx, "r", "db"); !errors.Is(err, errBoom) {
-			t.Errorf("failOn %q: %v", fail, err)
+// A connection failure reaches a condition and an Event as one of a few fixed
+// texts, and never as the raw error.
+func TestConnectionErrorsAreCoarse(t *testing.T) {
+	secret := "10.1.2.3:5432 pg.internal.example"
+	wrap := func(err error) error { return fmt.Errorf("dial tcp %s: %w", secret, err) }
+	for name, tc := range map[string]struct {
+		err      error
+		category error
+	}{
+		"policy":        {wrap(egress.ErrBlocked), ErrConnPolicy},
+		"auth":          {wrap(&pgconn.PgError{Code: "28P01", Message: secret}), ErrConnAuth},
+		"verify":        {wrap(&tls.CertificateVerificationError{Err: errors.New("x509: " + secret)}), ErrConnTLS},
+		"tls text":      {wrap(errors.New("tls: handshake failure")), ErrConnTLS},
+		"deadline":      {wrap(context.DeadlineExceeded), ErrConnTimeout},
+		"net timeout":   {wrap(&net.DNSError{Name: secret, IsTimeout: true}), ErrConnTimeout},
+		"refused":       {wrap(errors.New("connection refused")), ErrConnFailed},
+		"other pgerror": {wrap(&pgconn.PgError{Code: "53300", Message: secret}), ErrConnFailed},
+	} {
+		f := &fakePG{openErr: map[string]error{"": tc.err}}
+		_, err := f.admin().Database(context.Background(), "x")
+		if !errors.Is(err, lifecycle.ErrUnreachable) || !errors.Is(err, tc.category) || !errors.Is(err, tc.err) {
+			t.Errorf("%s: %v", name, err)
+		}
+		if want := "server unreachable: " + tc.category.Error(); err == nil || err.Error() != want {
+			t.Errorf("%s: message %q, want %q", name, err, want)
 		}
 	}
 }

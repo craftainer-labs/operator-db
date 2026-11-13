@@ -65,6 +65,9 @@ var (
 		"0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
 		"::/128", "::1/128", "fe80::/10", "ff00::/8",
 		"100.100.100.200/32", "fd00:ec2::254/128",
+		// IETF protocol assignments (which hold 192.0.0.192, Oracle's
+		// metadata address), benchmarking, and Azure's wire server.
+		"192.0.0.0/24", "198.18.0.0/15", "168.63.129.16/32",
 	)
 	// privateBlocked is added in ModeStrict.
 	privateBlocked = prefixes("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7")
@@ -97,16 +100,55 @@ func NewPolicy(m Mode) Policy {
 	return Policy{blocked: blocked}
 }
 
-// Check returns ErrBlocked when ip is in a blocked range. An IPv4-mapped IPv6
-// address is checked as the IPv4 address it carries.
+// Check returns ErrBlocked when ip, or the IPv4 address it carries, is in a
+// blocked range. An IPv6 address can carry an IPv4 one that a gateway then
+// reaches: IPv4-mapped (::ffff:), NAT64 (64:ff9b::/96 and 64:ff9b:1::/48),
+// 6to4 (2002::/16) and Teredo (2001::/32, the client address, inverted).
 func (p Policy) Check(ip netip.Addr) error {
 	ip = ip.Unmap().WithZone("")
+	if err := p.checkOne(ip); err != nil {
+		return err
+	}
+	if v4, ok := embeddedIPv4(ip); ok {
+		return p.checkOne(v4)
+	}
+	return nil
+}
+
+func (p Policy) checkOne(ip netip.Addr) error {
 	for _, pre := range p.blocked {
 		if pre.Contains(ip) {
 			return fmt.Errorf("%w: %s", ErrBlocked, ip)
 		}
 	}
 	return nil
+}
+
+var (
+	nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
+	nat64Local     = netip.MustParsePrefix("64:ff9b:1::/48")
+	sixToFour      = netip.MustParsePrefix("2002::/16")
+	teredo         = netip.MustParsePrefix("2001::/32")
+)
+
+// embeddedIPv4 returns the IPv4 address an IPv6 transition address carries.
+func embeddedIPv4(ip netip.Addr) (netip.Addr, bool) {
+	if !ip.Is6() {
+		return netip.Addr{}, false
+	}
+	b := ip.As16()
+	switch {
+	case nat64WellKnown.Contains(ip):
+		return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), true
+	case nat64Local.Contains(ip):
+		// RFC 6052 section 2.2, /48: the address skips the u octet (b[8]).
+		return netip.AddrFrom4([4]byte{b[6], b[7], b[9], b[10]}), true
+	case sixToFour.Contains(ip):
+		return netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]}), true
+	case teredo.Contains(ip):
+		return netip.AddrFrom4([4]byte{^b[12], ^b[13], ^b[14], ^b[15]}), true
+	}
+	return netip.Addr{}, false
 }
 
 // control is net.Dialer.Control: it runs after name resolution, once per
@@ -139,7 +181,7 @@ func (p Policy) Dialer(proxy *url.URL) (DialFunc, error) {
 	case "socks5":
 		// SOCKS5 fails only for a nil forward dialer, and a *net.Dialer is a
 		// ContextDialer.
-		sd, _ := xproxy.SOCKS5("tcp", proxy.Host, nil, d)
+		sd, _ := xproxy.SOCKS5("tcp", proxyAddr(proxy), nil, d)
 		cd, _ := sd.(xproxy.ContextDialer)
 		return func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if err := p.checkTarget(addr); err != nil {
@@ -159,8 +201,10 @@ func (p Policy) Dialer(proxy *url.URL) (DialFunc, error) {
 	}
 }
 
-// checkTarget checks the destination handed to a proxied dial when it is an
-// IP address; a host name is left to the proxy.
+// checkTarget checks the destination handed to a proxied dial. It must be an
+// IP address: a host name would be resolved by the proxy, where this policy
+// cannot see the answer, so it fails closed. pgconn resolves names itself and
+// hands the dialer addresses.
 func (p Policy) checkTarget(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -168,9 +212,19 @@ func (p Policy) checkTarget(addr string) error {
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
-		return nil
+		return fmt.Errorf("%w: %q is not an IP address", ErrBlocked, host)
 	}
 	return p.Check(ip)
+}
+
+// proxyAddr is the host:port of the proxy: the URL's port, or the scheme's
+// default (http 80, https 443, socks5 1080) when it names none.
+func proxyAddr(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443", "socks5": "1080"}[u.Scheme]
+	}
+	return net.JoinHostPort(u.Hostname(), port)
 }
 
 // proxyTLSConfig is the TLS configuration for an https proxy; tests replace
@@ -179,7 +233,7 @@ var proxyTLSConfig = func() *tls.Config { return &tls.Config{MinVersion: tls.Ver
 
 // connect opens an HTTP CONNECT tunnel to addr through the proxy.
 func connect(ctx context.Context, d *net.Dialer, proxy *url.URL, network, addr string) (net.Conn, error) {
-	conn, err := d.DialContext(ctx, network, proxy.Host)
+	conn, err := d.DialContext(ctx, network, proxyAddr(proxy))
 	if err != nil {
 		return nil, err
 	}
