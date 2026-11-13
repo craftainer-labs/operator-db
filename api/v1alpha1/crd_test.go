@@ -152,6 +152,17 @@ func TestServerDefaultsAndRules(t *testing.T) {
 	noHost.Spec.Host = ""
 	invalid(t, noHost, "host")
 
+	// Extension names are identifiers (user decision 4): no quotes, spaces,
+	// upper case, dots or a leading digit.
+	for i, ext := range []string{"Pg", "1ext", "a b", `a"b`, "a.b", "a;drop", ""} {
+		bad := serverObj(fmt.Sprintf("bad-ext-%d", i))
+		bad.Spec.AllowedExtensions = []string{ext}
+		invalid(t, bad, "allowedExtensions")
+	}
+	good := serverObj("good-ext")
+	good.Spec.AllowedExtensions = []string{"pgcrypto", "uuid-ossp", "_x1"}
+	g.Expect(k8sClient.Create(ctx, good)).To(Succeed())
+
 	badTLS := serverObj("bad-tls")
 	badTLS.Spec.TLS = &common.TLS{CABundle: &common.CABundle{}}
 	invalid(t, badTLS, "exactly one of secretRef and configMapRef")
@@ -184,6 +195,12 @@ func TestDatabaseDefaultsAndRules(t *testing.T) {
 	g.Expect(d.Spec.ManagementPolicies).To(Equal([]common.ManagementPolicy{common.ManagementAll}))
 	// deletionPolicy has no schema default: the operator pins it.
 	g.Expect(d.Spec.DeletionPolicy).To(BeEmpty())
+
+	for i, ext := range []string{"Pg", "1ext", `a"b`, "a b", "a;drop"} {
+		bad := databaseObj(fmt.Sprintf("bad-ext-%d", i))
+		bad.Spec.Extensions = []string{ext}
+		invalid(t, bad, "extensions")
+	}
 
 	// A limit of zero is kept, not defaulted away.
 	zero := int32(0)

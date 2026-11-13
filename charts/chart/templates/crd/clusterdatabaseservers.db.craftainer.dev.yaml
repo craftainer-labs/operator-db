@@ -90,6 +90,7 @@ spec:
                   spec.extensions of a Database must be a subset.
                 items:
                   maxLength: 63
+                  pattern: ^[a-z_][a-z0-9_-]*$
                   type: string
                 maxItems: 50
                 type: array

@@ -67,6 +67,7 @@ type PostgreSQL struct {
 	// spec.extensions of a Database must be a subset.
 	// +kubebuilder:validation:MaxItems=50
 	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_-]*$`
 	// +kubebuilder:default={}
 	// +optional
 	AllowedExtensions []string `json:"allowedExtensions,omitempty"`

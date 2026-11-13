@@ -30,8 +30,42 @@ defaults and the OpenAPI and CEL rules are in the CRD; the validating webhooks i
 `internal/webhook/v1alpha1` check only what the schema cannot (a server's `host`
 and `proxyURL`).
 
-The controllers, the PostgreSQL client and the chart's operator settings are not
-in yet; the manager serves the webhooks and the probes.
+## Controllers
+
+`Database` and `DatabaseRole` are reconciled by `internal/controller` over
+`lifecycle.Reconcile` of `lib-operator-go` (finalizer, `deletionPolicy`,
+`managementPolicies`, drift polling, two-phase rotation, conditions and Events).
+The PostgreSQL client is `internal/pgclient` (`jackc/pgx/v5`): identifiers are
+always quoted with `pgx.Identifier`, and extension names must match
+`^[a-z_][a-z0-9_-]*$` (in the CRD and again in the controller).
+
+- A `Database` is created from `template0`, named from its namespace and name
+  with a hash, and stamped with an ownership marker in `COMMENT ON DATABASE`;
+  `spec.extensions` must be in the server's `allowedExtensions`, and an
+  extension removed from the spec is never dropped.
+- A `DatabaseRole` is a `NOLOGIN` owner role with two `LOGIN` roles, `_a` and
+  `_b`, that `SET ROLE` to it. A rotation sets a new password on the other
+  login and retires the previous one after `rotationPolicy.gracePeriod`.
+  `privileges` become grants on the `public` schema of the database; objects an
+  `Owner` role creates after a `ReadOnly` or `ReadWrite` role was granted are
+  covered at that role's next privilege change. An update of the role (a changed
+  `privileges` or `connectionLimit`, or drift) issues the active login a new
+  password and rewrites the binding Secret.
+- Server health probing (`ClusterDatabaseServer` and `DatabaseServer` status) is
+  not in yet.
+
+Configuration, as flags with environment defaults:
+
+| Variable | Flag | Meaning |
+| --- | --- | --- |
+| `DEFAULT_DATA_DELETION_POLICY` | `--default-data-deletion-policy` | `Retain` (default) or `Delete`, pinned into a new `Database` that leaves `deletionPolicy` unset; anything else fails startup |
+| `EGRESS_MODE` | `--egress-mode` | `strict` (default) blocks loopback, link-local and metadata, and private ranges; `allow-private` blocks all but the private ranges ([NFR-0003](docs/nfrs/NFR-0003-restricted-egress-and-proxy.md)) |
+| `POD_NAMESPACE` | `--operator-namespace` | where a cluster server's admin Secret is read; empty uses the service account's namespace |
+
+The tests of the controller run against the Kubernetes API (envtest) with a fake
+PostgreSQL behind `pgclient.Session`. The lane that runs the SQL against a real
+PostgreSQL with TLS is NO2b-2. The non-functional requirements are in
+[`docs/nfrs`](docs/nfrs).
 
 ## Quick start
 

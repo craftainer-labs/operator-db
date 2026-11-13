@@ -35,6 +35,7 @@ type DatabaseSpec struct {
 	// allowedExtensions; the controller checks that.
 	// +kubebuilder:validation:MaxItems=20
 	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_-]*$`
 	// +listType=set
 	// +optional
 	Extensions []string `json:"extensions,omitempty"`

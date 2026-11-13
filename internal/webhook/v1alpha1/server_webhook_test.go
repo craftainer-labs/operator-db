@@ -41,7 +41,8 @@ func TestValidateServer(t *testing.T) {
 	for _, proxy := range []string{"http://proxy:3128", "https://proxy", "socks5://127.0.0.1:1080"} {
 		g.Expect(validateServer("pg", proxy)).To(Succeed(), proxy)
 	}
-	for _, proxy := range []string{"ftp://proxy", "proxy:3128", "http://", "://x", "http://%zz", "pg"} {
+	for _, proxy := range []string{"ftp://proxy", "proxy:3128", "http://", "://x", "http://%zz", "pg",
+		"http://user:s3cret@proxy:3128", "socks5://user@proxy", "https://:pw@proxy"} {
 		g.Expect(validateServer("pg", proxy)).To(MatchError(ErrInvalidProxyURL), proxy)
 	}
 	// The proxy URL, which may hold credentials, is not echoed.
