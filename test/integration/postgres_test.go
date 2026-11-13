@@ -554,3 +554,57 @@ func TestAdminPool(t *testing.T) {
 		t.Errorf("MaxConns = %d, want 2", got)
 	}
 }
+
+// An admin that may create roles but not terminate sessions (no
+// pg_signal_backend, not a superuser, as on a managed service) still retires a
+// login: it is disabled and its password cleared, the sessions stay, and the
+// error says so (ErrSessionsNotEnded) instead of failing the retire.
+func TestRetireWithoutTerminatePrivilege(t *testing.T) {
+	ctx := context.Background()
+	sv := load(t)
+	root := adminSession(t, sv.admin(), "")
+	limited := "it_limited_" + suffix()
+	limitedPW := rand.Text() + rand.Text()
+	verifier, err := pgclient.ScramVerifier(limitedPW)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Exec(ctx, "CREATE ROLE "+pgclient.Ident(limited)+" LOGIN CREATEROLE PASSWORD "+pgclient.Literal(verifier)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Exec(ctx, "DROP ROLE IF EXISTS "+pgclient.Ident(limited)) })
+
+	// The role is created by the limited admin, which makes it that role's
+	// ADMIN and so allowed to alter it.
+	lim, err := sv.as(t, limited, limitedPW, "postgres")
+	lim = mustSession(t, lim, err)
+	base := pgclient.RoleBase("it-"+suffix(), "limited")
+	login := pgclient.LoginName(base, pgclient.GenA)
+	pw := rand.Text() + rand.Text()
+	if err := lim.Exec(ctx, "CREATE ROLE "+pgclient.Ident(login)+" LOGIN PASSWORD "+pgclient.Literal(pw)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = lim.Exec(ctx, "DROP ROLE IF EXISTS "+pgclient.Ident(login))
+		_ = root.Exec(ctx, "DROP ROLE IF EXISTS "+pgclient.Ident(login))
+	})
+	open := loginSession(t, sv, login, pw, "postgres")
+
+	admin := sv.admin(func(t *pgclient.Target) { t.User, t.Password = limited, limitedPW })
+	if err := admin.Retire(ctx, base, pgclient.GenA); !errors.Is(err, pgclient.ErrSessionsNotEnded) {
+		t.Fatalf("Retire: %v", err)
+	}
+	if got := one(t, root, "SELECT rolcanlogin::text AS login FROM pg_roles WHERE rolname = "+pgclient.Literal(login), "login"); got != "false" {
+		t.Errorf("rolcanlogin = %q after Retire, want false", got)
+	}
+	if got := one(t, root, "SELECT (rolpassword IS NULL)::text AS cleared FROM pg_authid WHERE rolname = "+pgclient.Literal(login), "cleared"); got != "true" {
+		t.Errorf("password cleared = %q", got)
+	}
+	if _, err := open.Query(ctx, "SELECT 1"); err != nil {
+		t.Errorf("the session was ended without the privilege: %v", err)
+	}
+	if s, err := sv.as(t, login, pw, "postgres"); err == nil {
+		s.Close(ctx)
+		t.Error("the retired login can open a new session")
+	}
+}

@@ -69,7 +69,13 @@ always quoted with `pgx.Identifier`, and extension names must match
   PostgreSQL stores as it is, so statement logging and `pg_stat_statements`
   hold only the verifier ([NFR-0004](docs/nfrs/NFR-0004-least-privilege-and-no-credentials-in-output.md)).
   Retiring a login (`NOLOGIN`, password cleared) also ends its open sessions
-  with `pg_terminate_backend`.
+  with `pg_terminate_backend`, which needs the admin role to be a superuser or
+  a member of `pg_signal_backend`. Without it the retire still succeeds,
+  because `NOLOGIN` and the cleared password already refuse every new session:
+  the operator logs a warning, emits a `SessionsNotTerminated` Warning Event
+  and sets the `SessionsTerminated` condition to `False` with that reason
+  (cleared by the next retire that ends the sessions). Any other error on that
+  statement fails the retire.
 - The admin connections of a server are reused between reconciles: one
   `pgxpool` per server (at most two connections, idle ones closed after 30
   seconds, health-checked every 30 seconds, a broken one discarded when it is
@@ -78,8 +84,9 @@ always quoted with `pgx.Identifier`, and extension names must match
   session. The pool is keyed on the server's UID and generation and a hash of
   the resolved connection (host, port, credentials, CA, TLS settings, proxy), so
   a rotated admin Secret or CA replaces it (the old pool is closed in the
-  background), and it is dropped when the server is gone or unused for ten
-  minutes.
+  background; a reconcile that still holds it fails once as an unreachable
+  server and is retried), and it is dropped when the server is gone or
+  invalid, or unused for ten minutes.
 - A `DatabaseRole` is reconciled again when the `Database` it names changes (a
   watch through a field index), so a role waiting for its `Database` goes on as
   soon as the `Database` has its name.

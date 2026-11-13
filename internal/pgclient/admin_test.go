@@ -31,6 +31,7 @@ type fakePG struct {
 	closed  int
 	rows    []scripted
 	failOn  string
+	failErr error // returned instead of errBoom
 	openErr map[string]error
 }
 
@@ -51,6 +52,9 @@ type fakeSession struct {
 func (s *fakeSession) record(sql string) error {
 	s.f.stmts = append(s.f.stmts, s.db+"|"+sql)
 	if s.f.failOn != "" && strings.Contains(sql, s.f.failOn) {
+		if s.f.failErr != nil {
+			return s.f.failErr
+		}
 		return errBoom
 	}
 	return nil
@@ -345,6 +349,18 @@ func TestRetire(t *testing.T) {
 		if err := f.admin().Retire(ctx, "r", GenA); !errors.Is(err, errBoom) {
 			t.Errorf("failOn %q: %v", fail, err)
 		}
+	}
+
+	// An admin that may not terminate sessions has still retired the login; the
+	// error says so. Other server errors on the terminate query still fail.
+	f = &fakePG{rows: roleRows("r", true), failOn: "pg_terminate_backend", failErr: &pgconn.PgError{Code: "42501"}}
+	if err := f.admin().Retire(ctx, "r", GenA); !errors.Is(err, ErrSessionsNotEnded) {
+		t.Errorf("insufficient privilege: %v", err)
+	}
+	f.want(t, `|ALTER ROLE "r_a" WITH NOLOGIN PASSWORD NULL`)
+	f = &fakePG{rows: roleRows("r", true), failOn: "pg_terminate_backend", failErr: &pgconn.PgError{Code: "53300"}}
+	if err := f.admin().Retire(ctx, "r", GenA); err == nil || errors.Is(err, ErrSessionsNotEnded) {
+		t.Errorf("other error: %v", err)
 	}
 }
 

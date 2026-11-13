@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "operator-db chart values",
+  "description": "Only the values whose wrong spelling would make the manager exit at startup are checked; every other value is open.",
+  "type": "object",
+  "properties": {
+    "egressMode": {
+      "description": "The manager's EGRESS_MODE (internal/egress ParseMode).",
+      "type": "string",
+      "enum": ["strict", "allow-private"]
+    },
+    "defaultDataDeletionPolicy": {
+      "description": "The manager's DEFAULT_DATA_DELETION_POLICY (lifecycle.ParseDefaultDeletionPolicy).",
+      "type": "string",
+      "enum": ["Retain", "Delete"]
+    }
+  },
+  "additionalProperties": true
+}

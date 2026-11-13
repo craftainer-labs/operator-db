@@ -242,3 +242,40 @@ func TestBackendRejectsAnInvalidCABundle(t *testing.T) {
 		t.Errorf("with a cache: %v, %d cached", err, h.cfg.Cache.Len())
 	}
 }
+
+// A server that became invalid drops its cached pool; a namespace it does not
+// serve does not, because the entry is shared with the namespaces it does.
+func TestBackendForgetsAnInvalidServer(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, common.DeletionRetain, nil)
+	h.cfg.Cache = NewServerCache(time.Minute)
+	key := serverKey(h.ns, h.ref())
+	cached := newPool()
+	get(t, h.cfg.Cache, key, "v", cached)
+
+	// Not allowed here: the entry stays.
+	h.get(h.server)
+	h.server.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesSelector, Selector: &common.LabelSelector{
+		MatchLabels: map[string]string{"nobody": "has-this"},
+	}}
+	h.must(env.Client.Update(ctx, h.server))
+	if _, err := h.cfg.backend(ctx, h.ns, h.ref()); !errors.Is(err, server.ErrNamespaceNotAllowed) || h.cfg.Cache.Len() != 1 {
+		t.Fatalf("namespace not allowed: %v, %d cached", err, h.cfg.Cache.Len())
+	}
+
+	// A CA bundle key that is not in its Secret makes the server invalid.
+	h.must(env.Client.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-ca", Namespace: h.ops},
+		Data:       map[string][]byte{"other": []byte("x")},
+	}))
+	h.get(h.server)
+	h.server.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
+	h.server.Spec.TLS = &common.TLS{CABundle: &common.CABundle{SecretRef: &common.KeyReference{Name: "empty-ca", Key: "root.pem"}}}
+	h.must(env.Client.Update(ctx, h.server))
+	if _, err := h.cfg.backend(ctx, h.ns, h.ref()); !errors.Is(err, server.ErrInvalidServer) || h.cfg.Cache.Len() != 0 {
+		t.Fatalf("invalid server: %v, %d cached", err, h.cfg.Cache.Len())
+	}
+	if !isClosed(cached) {
+		t.Error("the pool of the invalid server was not closed")
+	}
+}

@@ -68,6 +68,9 @@ type backend struct {
 	admin pgclient.Admin
 	// pool is the server's cached admin pool; nil without a cache.
 	pool *pgxpool.Pool
+	// recorder reports what a claim's External cannot return as an error; nil
+	// reports nothing.
+	recorder events.EventRecorder
 	spec dbv1alpha1.PostgreSQL
 	conn server.Connection
 }
@@ -80,7 +83,11 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	cacheKey := serverKey(ns, ref)
 	conn, err := server.Resolve(ctx, c.Client, ns, ref, server.WithOperatorNamespace(c.OperatorNamespace))
 	if err != nil {
-		if errors.Is(err, server.ErrServerNotFound) {
+		// A server that is gone or no longer usable keeps no connections. A
+		// namespace the server does not serve says nothing about the server
+		// (other namespaces share the entry), so it is not on this list.
+		if errors.Is(err, server.ErrServerNotFound) || errors.Is(err, server.ErrInvalidServer) ||
+			errors.Is(err, server.ErrAdminSecretNamespaceForbidden) {
 			c.Cache.Forget(cacheKey)
 		}
 		return nil, err
@@ -113,7 +120,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 			return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, err)
 		}
 	}
-	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, spec: spec, conn: conn}, nil
+	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, recorder: c.Recorder, spec: spec, conn: conn}, nil
 }
 
 // serverObject is the server a claim names, as much of it as the controllers

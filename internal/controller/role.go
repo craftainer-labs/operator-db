@@ -11,6 +11,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -249,9 +251,41 @@ func (e *roleExternal) RotateBegin(ctx context.Context, _ dbv1alpha1.DatabaseRol
 
 // RotateFinish implements lifecycle.Rotator. st.Previous is empty during the
 // first grace period, so the login to retire is the one that is not active.
+//
+// Ending the sessions of the retired login is best effort: an admin role that
+// lacks pg_signal_backend cannot, and the retire still succeeds, because NOLOGIN
+// and the cleared password already refuse every new session. It is reported
+// with a log line, a Warning Event and the SessionsTerminated condition (False,
+// SessionsNotTerminated, a fixed text); the condition goes away when a later
+// retire ends the sessions.
 func (e *roleExternal) RotateFinish(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec, _ pgclient.RoleState, st lifecycle.RotationState) error {
-	return e.be.admin.Retire(ctx, e.base, pgclient.OtherGen(string(st.Active)))
+	err := e.be.admin.Retire(ctx, e.base, pgclient.OtherGen(string(st.Active)))
+	if !errors.Is(err, pgclient.ErrSessionsNotEnded) {
+		if err == nil {
+			meta.RemoveStatusCondition(e.claim.GetConditions(), ConditionSessionsTerminated)
+		}
+		return err
+	}
+	log.FromContext(ctx).Info("the retired login was disabled, but its open sessions were not ended: "+
+		"the admin role needs pg_signal_backend", "login", pgclient.LoginName(e.base, pgclient.OtherGen(string(st.Active))))
+	if e.be.recorder != nil {
+		e.be.recorder.Eventf(e.claim, nil, corev1.EventTypeWarning, ReasonSessionsNotTerminated, "Rotate", "%s", sessionsNotTerminatedText)
+	}
+	meta.SetStatusCondition(e.claim.GetConditions(), metav1.Condition{
+		Type: ConditionSessionsTerminated, Status: metav1.ConditionFalse, Reason: ReasonSessionsNotTerminated,
+		Message: sessionsNotTerminatedText, ObservedGeneration: e.claim.GetGeneration(),
+	})
+	return nil
 }
+
+// ConditionSessionsTerminated and ReasonSessionsNotTerminated report that a
+// retired login's open sessions could not be ended (see RotateFinish).
+const (
+	ConditionSessionsTerminated = "SessionsTerminated"
+	ReasonSessionsNotTerminated = "SessionsNotTerminated"
+	sessionsNotTerminatedText   = "the previous login is disabled, but its open sessions were not ended: " +
+		"the admin role needs pg_signal_backend"
+)
 
 // data is the postgresql binding of one login (ADR 0002, section 7). The CA is
 // the server's bundle; the uri carries the password, like the Secret does.

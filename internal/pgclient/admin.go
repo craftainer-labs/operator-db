@@ -27,6 +27,11 @@ var (
 	// ErrNotOwned means a role of a DatabaseRole exists and its ownership
 	// marker does not name the claim: the operator never touches it.
 	ErrNotOwned = errors.New("role belongs to another claim or is not managed by this operator")
+	// ErrSessionsNotEnded means Retire disabled the login but the admin role
+	// may not end the sessions already open on it (SQLSTATE 42501): it needs
+	// pg_signal_backend (or superuser). Nothing else failed, and no new session
+	// can open.
+	ErrSessionsNotEnded = errors.New("the admin role may not terminate sessions (needs pg_signal_backend)")
 )
 
 // The categories of a failed connection. A condition and an Event carry the
@@ -401,9 +406,14 @@ func privilegeStatements(base, privileges string) ([]string, error) {
 	}, nil
 }
 
+// sqlStateInsufficientPrivilege is SQLSTATE 42501.
+const sqlStateInsufficientPrivilege = "42501"
+
 // Retire disables the login of gen, clears its password and ends its open
 // sessions (NOLOGIN stops new ones only). It succeeds when the role is already
-// gone.
+// gone. Ending the sessions is best effort: when the admin role may not
+// terminate them, the login is retired all the same and the error is
+// ErrSessionsNotEnded, which the caller reports without failing the retire.
 func (a Admin) Retire(ctx context.Context, base, gen string) error {
 	st, err := a.Role(ctx, base)
 	if err != nil || !st.Login(gen).Exists {
@@ -415,6 +425,10 @@ func (a Admin) Retire(ctx context.Context, base, gen string) error {
 			return err
 		}
 		_, err := s.Query(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = "+Literal(login))
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == sqlStateInsufficientPrivilege {
+			return fmt.Errorf("%w: %w", ErrSessionsNotEnded, err)
+		}
 		return err
 	})
 }

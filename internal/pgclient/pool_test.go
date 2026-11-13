@@ -6,6 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/puddle/v2"
+
+	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
+
 	"github.com/craftainer-labs/operator-db/internal/egress"
 )
 
@@ -124,5 +128,22 @@ func TestNewPoolErrors(t *testing.T) {
 	t.Setenv("PGPORT", "not-a-port")
 	if _, err := NewPool(Target{Host: "127.0.0.1"}); err == nil {
 		t.Error("no error for PGPORT=not-a-port")
+	}
+}
+
+// A pool closed under a reconcile (the server changed) fails the next Acquire
+// with puddle.ErrClosedPool; the Admin reports it as an unreachable server,
+// which lifecycle.Reconcile retries.
+func TestClosedPoolIsARetryableUnreachableServer(t *testing.T) {
+	blocked, _ := egress.NewPolicy(egress.ModeStrict).Dialer(nil)
+	tgt := Target{Host: "127.0.0.1", Port: 1, Dial: blocked}
+	pool, err := NewPool(tgt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	_, err = Admin{Open: Opener(pool, Connect, tgt)}.Database(context.Background(), "x")
+	if !errors.Is(err, puddle.ErrClosedPool) || !errors.Is(err, lifecycle.ErrUnreachable) || !errors.Is(err, ErrConnFailed) {
+		t.Errorf("closed pool: %v", err)
 	}
 }
