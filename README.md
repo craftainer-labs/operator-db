@@ -168,7 +168,7 @@ schema, `charts/chart/values.schema.json`, rejects a misspelt enum or digest):
 | `defaultDataDeletionPolicy` | `Retain` | the `deletionPolicy` a new `Database` is pinned to when it leaves it unset |
 | `global.imageRegistry` | empty | pull the image from a mirror (air-gapped, EB-5) |
 | `manager.image.digest` | set when released | image by digest; wins over `tag` |
-| `manager.extraEnv` | `[]` | extra environment, e.g. `NO_PROXY` or `HTTPS_PROXY` for the Kubernetes API client, or `SSL_CERT_FILE` with a bundle mounted through `manager.extraVolumes` and `manager.extraVolumeMounts` |
+| `manager.extraEnv` | `[]` | extra environment (not `POD_NAMESPACE`, `EGRESS_MODE` or `DEFAULT_DATA_DELETION_POLICY`: the chart sets them, and the schema rejects them here), e.g. `NO_PROXY` or `HTTPS_PROXY` for the Kubernetes API client, or `SSL_CERT_FILE` with a bundle mounted through `manager.extraVolumes` and `manager.extraVolumeMounts` |
 | `manager.podSecurityContext`, `manager.securityContext` | restricted | non-root, seccomp `RuntimeDefault`, no privilege escalation, all capabilities dropped, read-only root filesystem (EB-10); the e2e installs into a `restricted` namespace as an arbitrary UID |
 | `crd.keep` | `true` | keep the CRDs, and with them every claim, when the release is uninstalled |
 
@@ -194,9 +194,9 @@ create a `ClusterExtension`.
 The operator holds no data of its own: everything it knows is in Kubernetes
 objects and in PostgreSQL.
 
-| Owned by | What | Back it up with |
+| Kept in | What | Back it up with |
 | --- | --- | --- |
-| The operator (Kubernetes) | the four kinds and their status, binding Secrets (`servicebinding.io/postgresql`), the admin Secrets and CA bundles that servers reference | your cluster backup (Velero, GitOps, etcd). Restore the servers and admin Secrets first, then the claims |
+| Kubernetes | the four kinds and their status, binding Secrets (`servicebinding.io/postgresql`), the admin Secrets and CA bundles that servers reference | your cluster backup (Velero, GitOps, etcd). Restore the servers and admin Secrets first, then the claims |
 | The PostgreSQL server | database contents, roles' grants and passwords' verifiers, the ownership markers (`COMMENT ON DATABASE`/`ROLE`) | the server's own tooling (`pg_dump`, base backups, WAL archiving, the managed service's snapshots) |
 
 The operator never dumps or restores data. What it does on a restore:
@@ -209,8 +209,8 @@ The operator never dumps or restores data. What it does on a restore:
   role), using the restored claim's UID.
 - Restoring a server from a dump keeps the comments, so markers survive; roles
   and their passwords come back with a `pg_dumpall --roles-only`. A restored
-  login has an old password: the binding Secret is rewritten at the next
-  rotation or update of the `DatabaseRole`.
+  login has the password of the dump, which no longer matches the binding
+  Secret: rotate the `DatabaseRole` to issue a new one.
 - Binding Secrets are rewritten by the operator, so a restore of them is not
   required.
 

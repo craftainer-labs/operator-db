@@ -340,9 +340,10 @@ spec:
                         ports:
                           - name: postgres
                             containerPort: 5432
+                        # TCP, not the socket: the image's init server listens on the socket only.
                         readinessProbe:
                           exec:
-                            command: [pg_isready, -h, /var/run/postgresql]
+                            command: [pg_isready, -h, 127.0.0.1]
                           periodSeconds: 3
                         securityContext:
                           allowPrivilegeEscalation: false

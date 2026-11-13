@@ -45,7 +45,14 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name"]
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "description": "Not one of the variables the chart sets itself: a duplicate name would override it.",
+                "type": "string",
+                "not": {"enum": ["POD_NAMESPACE", "EGRESS_MODE", "DEFAULT_DATA_DELETION_POLICY"]}
+              }
+            }
           }
         },
         "podSecurityContext": {

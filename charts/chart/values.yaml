@@ -41,7 +41,10 @@ manager:
   args:
     - --leader-elect
 
-  ## Extra environment variables for the manager container (EB-5), e.g.
+  ## Extra environment variables for the manager container (EB-5). POD_NAMESPACE,
+  ## EGRESS_MODE and DEFAULT_DATA_DELETION_POLICY are set by the chart (use
+  ## egressMode and defaultDataDeletionPolicy); the schema rejects them here.
+  ## E.g.
   ## HTTP(S)_PROXY and NO_PROXY for the Kubernetes API client, or SSL_CERT_FILE
   ## with a custom CA bundle mounted through extraVolumes and extraVolumeMounts.
   ## The operator makes no outbound call of its own: it talks to the Kubernetes
