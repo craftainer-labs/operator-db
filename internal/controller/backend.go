@@ -71,8 +71,8 @@ type backend struct {
 	// recorder reports what a claim's External cannot return as an error; nil
 	// reports nothing.
 	recorder events.EventRecorder
-	spec dbv1alpha1.PostgreSQL
-	conn server.Connection
+	spec     dbv1alpha1.PostgreSQL
+	conn     server.Connection
 }
 
 // backend resolves ref for a claim in ns: the connection settings through

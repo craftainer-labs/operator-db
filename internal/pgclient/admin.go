@@ -409,6 +409,11 @@ func privilegeStatements(base, privileges string) ([]string, error) {
 // sqlStateInsufficientPrivilege is SQLSTATE 42501.
 const sqlStateInsufficientPrivilege = "42501"
 
+func insufficientPrivilege(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == sqlStateInsufficientPrivilege
+}
+
 // Retire disables the login of gen, clears its password and ends its open
 // sessions (NOLOGIN stops new ones only). It succeeds when the role is already
 // gone. Ending the sessions is best effort: when the admin role may not
@@ -425,8 +430,7 @@ func (a Admin) Retire(ctx context.Context, base, gen string) error {
 			return err
 		}
 		_, err := s.Query(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = "+Literal(login))
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == sqlStateInsufficientPrivilege {
+		if insufficientPrivilege(err) {
 			return fmt.Errorf("%w: %w", ErrSessionsNotEnded, err)
 		}
 		return err
@@ -471,8 +475,7 @@ func (a Admin) DropRole(ctx context.Context, base, claim, database string) error
 	// drops the roles: PostgreSQL allows DROP ROLE while sessions are open, and
 	// failing here would leave the finalizer stuck. As in Retire, the missing
 	// privilege only costs the early end of those sessions.
-	var pgErr *pgconn.PgError
-	if err != nil && !(errors.As(err, &pgErr) && pgErr.Code == sqlStateInsufficientPrivilege) {
+	if err != nil && !insufficientPrivilege(err) {
 		return err
 	}
 	err = a.with(ctx, database, func(s Session) error {

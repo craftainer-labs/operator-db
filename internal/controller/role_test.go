@@ -302,13 +302,13 @@ func TestRoleRetireWithoutTerminatePrivilege(t *testing.T) {
 		h.must(env.Client.Patch(context.Background(), role, patch))
 		cur := "a"
 		if role.Status.Rotation != nil {
-			cur = string(role.Status.Rotation.Active)
+			cur = role.Status.Rotation.Active
 		}
 		h.fake.answer = roleAnswer(base, claim, "ReadWrite", cur, true, true)
 		h.reconcileOK(rr, role)
 		h.get(role)
 		active := role.Status.Rotation.Active
-		h.fake.answer = roleAnswer(base, claim, "ReadWrite", string(active), true, true)
+		h.fake.answer = roleAnswer(base, claim, "ReadWrite", active, true, true)
 		h.now = h.now.Add(2 * time.Hour)
 		h.reconcileOK(rr, role)
 		h.get(role)
