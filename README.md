@@ -145,6 +145,90 @@ with TLS (verify-full, scram-sha-256) in the integration lane,
 devcontainer locally); the 100% coverage gate stays on the unit profile. The non-functional requirements are in
 [`docs/nfrs`](docs/nfrs).
 
+## Install
+
+Helm and OLM v1 need cert-manager for the webhooks' serving certificate; OLM
+v0 issues its own, so it needs none. The released chart, bundle and catalog are on
+GHCR, signed and attested (`release-extras.yml`, see `docs/TEMPLATE.md`).
+
+### Helm
+
+```sh
+helm install operator-db oci://ghcr.io/craftainer-labs/charts/operator-db \
+  --version X.Y.Z --namespace operator-db-system --create-namespace \
+  --set egressMode=allow-private
+```
+
+A released chart pins the manager image by digest. Values worth knowing (the
+schema, `charts/chart/values.schema.json`, rejects a misspelt enum or digest):
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `egressMode` | `strict` | `allow-private` is the usual choice when servers live on cluster or private addresses |
+| `defaultDataDeletionPolicy` | `Retain` | the `deletionPolicy` a new `Database` is pinned to when it leaves it unset |
+| `global.imageRegistry` | empty | pull the image from a mirror (air-gapped, EB-5) |
+| `manager.image.digest` | set when released | image by digest; wins over `tag` |
+| `manager.extraEnv` | `[]` | extra environment (not `POD_NAMESPACE`, `EGRESS_MODE` or `DEFAULT_DATA_DELETION_POLICY`: the chart sets them, and the schema rejects them here), e.g. `NO_PROXY` or `HTTPS_PROXY` for the Kubernetes API client, or `SSL_CERT_FILE` with a bundle mounted through `manager.extraVolumes` and `manager.extraVolumeMounts` |
+| `manager.podSecurityContext`, `manager.securityContext` | restricted | non-root, seccomp `RuntimeDefault`, no privilege escalation, all capabilities dropped, read-only root filesystem (EB-10); the e2e installs into a `restricted` namespace as an arbitrary UID |
+| `crd.keep` | `true` | keep the CRDs, and with them every claim, when the release is uninstalled |
+
+The operator makes no outbound call except to the Kubernetes API and to the
+PostgreSQL servers named by claims, and it sends no telemetry. A server's proxy
+and CA bundle belong to the server object (`spec.proxyURL`, `spec.tls.caBundle`),
+not to the chart.
+
+The CSV therefore declares `features.operators.openshift.io/proxy-aware: "false"`: PostgreSQL egress is per server (`spec.proxyURL`), and the in-cluster Kubernetes API client needs no proxy. `disconnected` is `"true"` and the fips, tls-profiles and token-auth features are `"false"`.
+
+### OLM
+
+`make bundle` writes the bundle from `config/manifests` (`make bundle-validate`
+checks it offline; `bundle/` is generated and not committed). It supports
+`AllNamespaces` only, pins the manager image by digest and lists it in
+`spec.relatedImages`. The released bundle and a single-bundle catalog are
+`ghcr.io/craftainer-labs/operator-db-bundle` and `...-catalog`; add the catalog
+as a `CatalogSource` (OLM v0) or a `ClusterCatalog` (OLM v1) and subscribe or
+create a `ClusterExtension`.
+
+## Backup and restore
+
+The operator holds no data of its own: everything it knows is in Kubernetes
+objects and in PostgreSQL.
+
+| Kept in | What | Back it up with |
+| --- | --- | --- |
+| Kubernetes | the four kinds and their status, binding Secrets (`servicebinding.io/postgresql`), the admin Secrets and CA bundles that servers reference | your cluster backup (Velero, GitOps, etcd). Restore the servers and admin Secrets first, then the claims |
+| The PostgreSQL server | database contents, roles' grants and passwords' verifiers, the ownership markers (`COMMENT ON DATABASE`/`ROLE`) | the server's own tooling (`pg_dump`, base backups, WAL archiving, the managed service's snapshots) |
+
+The operator never dumps or restores data. What it does on a restore:
+
+- Restoring claims into a cluster whose server already has the databases and
+  roles: a claim whose object carries its marker (`craftainer.dev/claim=<namespace>/<name>/<uid>`)
+  is re-adopted; one without it, or with a marker of another claim (a restored
+  claim has a new UID), reports `NameCollision` and nothing is changed. Hand the
+  object over with `COMMENT ON DATABASE "<name>" IS '<marker>'` (`ROLE` for a
+  role), using the restored claim's UID.
+- Restoring a server from a dump keeps the comments, so markers survive; roles
+  and their passwords come back with a `pg_dumpall --roles-only`. A restored
+  login has the password of the dump, which no longer matches the binding
+  Secret: rotate the `DatabaseRole` to issue a new one.
+- Binding Secrets are rewritten by the operator, so a restore of them is not
+  required.
+
+`deletionPolicy` (on `Database` only; `DatabaseRole` always drops its roles)
+decides what deleting a claim does to the data:
+
+- `Retain` (the default; `DEFAULT_DATA_DELETION_POLICY` sets it for a claim that
+  leaves it unset, pinned in `status.effectiveDeletionPolicy`): the database
+  and its data stay on the server, the finalizer is released. A later claim of
+  the same name needs the marker handed over (above).
+- `Delete`: the database is dropped with `DROP DATABASE ... WITH (FORCE)`.
+  Take a backup first; there is no undo.
+- Either way, an object whose marker names another claim is skipped and the
+  finalizer released, and a claim that never issued a create touches nothing
+  (see "Deleting a claim").
+- Uninstalling the chart with `crd.keep=false`, or deleting a CRD, deletes every
+  claim of that kind and applies each claim's policy.
+
 ## Quick start
 
 Open the repository in its devcontainer (the Go and Kubernetes tools are
