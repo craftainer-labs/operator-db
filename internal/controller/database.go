@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -15,6 +16,10 @@ import (
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
 	"github.com/craftainer-labs/operator-db/internal/pgclient"
 )
+
+// sqlStateDuplicateDatabase is SQLSTATE 42P04, the answer of CREATE DATABASE to
+// a name that is taken.
+const sqlStateDuplicateDatabase = "42P04"
 
 // ErrExtensionNotAllowed means a Database asks for an extension its server's
 // allowedExtensions does not list.
@@ -174,7 +179,17 @@ func (e *databaseExternal) Create(ctx context.Context, spec dbv1alpha1.DatabaseS
 	if err := e.persist(ctx); err != nil {
 		return nil, err
 	}
-	return nil, e.be.admin.CreateDatabase(ctx, e.params(spec))
+	err := e.be.admin.CreateDatabase(ctx, e.params(spec))
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != sqlStateDuplicateDatabase {
+		return nil, err
+	}
+	// Somebody made a database of the name between Observe and the create. CREATE
+	// DATABASE is atomic, so nothing of this claim is on the server: the record
+	// is withdrawn, or a later delete would take the database for ours (it has
+	// no marker) and drop it.
+	e.claim.SetExternalID("")
+	return nil, errors.Join(err, e.persist(ctx))
 }
 
 // Update implements lifecycle.External. It never drops an extension.
