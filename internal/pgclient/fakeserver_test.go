@@ -105,6 +105,7 @@ func (fs *fakeServer) serve(c net.Conn, ca testCA) {
 		return
 	}
 	b.Send(&pgproto3.AuthenticationOk{})
+	b.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
 	b.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	if b.Flush() != nil {
 		return

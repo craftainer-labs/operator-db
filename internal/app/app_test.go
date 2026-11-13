@@ -23,6 +23,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/config"
@@ -270,8 +271,11 @@ func TestRunWithPlainMetricsAndNoWebhooks(t *testing.T) {
 
 func TestRunReportsASetupError(t *testing.T) {
 	g := NewWithT(t)
-	// A webhook cannot be registered for a type the scheme does not know.
-	emptyScheme := func(o *ctrl.Options) { o.Scheme = runtime.NewScheme() }
+	// A webhook cannot be registered for a type the scheme does not know (the
+	// scheme has the core types the manager needs, but not the API group).
+	coreOnly := runtime.NewScheme()
+	g.Expect(clientgoscheme.AddToScheme(coreOnly)).To(Succeed())
+	emptyScheme := func(o *ctrl.Options) { o.Scheme = coreOnly }
 	args := []string{"--health-probe-bind-address=0", "--metrics-bind-address=0"}
 	err := Run(context.Background(), args, getConfig, io.Discard, emptyScheme)
 	g.Expect(err).To(HaveOccurred())
