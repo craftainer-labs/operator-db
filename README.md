@@ -132,9 +132,10 @@ promise from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind,
 wired in `internal/app`:
 
 - `status.serverVersion`: what `SHOW server_version` reports (at most 64 bytes);
-  `status.lastProbeTime`: the last probe that ran and whose result was recorded (a server that cannot be probed, `InvalidServer`, has none). It is
-  rewritten when the result changes and otherwise every 10 minutes, so a healthy
-  fleet does not write one status per server per minute.
+  `status.lastProbeTime`: the last probe that ran and whose result was recorded
+  (a server that cannot be probed, `InvalidServer`, has none). It is rewritten
+  when the result changes and otherwise every 10 minutes, so a healthy fleet does
+  not write one status per server per minute.
 - `Ready` and `ServerReachable` are `True` (reason `Available`) when the probe
   connected and read the version, and `False` with reason `ServerUnreachable`
   when it did not. A server whose admin Secret is in a forbidden namespace is
@@ -153,13 +154,14 @@ wired in `internal/app`:
   for the probe and closes it. Credentials are never in an error or a log.
 - RBAC: `get`, `list` and `watch` on Secrets and ConfigMaps, and `get`, `patch`
   on the servers' `status`, in the chart role.
-- The manager cache must not filter out Secrets and ConfigMaps for the probe's
-  watches on the admin Secret and the CA bundle to see them. Here, ConfigMaps are
-  cached unfiltered, but the Secret cache keeps only the `managed-by` binding
-  Secrets (so the operator does not hold every Secret in memory), and the probe
-  reads the admin Secret and CA Secret live, not from the cache. So creating or
-  fixing an unlabelled Secret does not probe at once: the next interval does.
-  Do not widen the Secret cache to every Secret just for that.
+- Caches: the manager's Secret cache keeps only the `managed-by` binding Secrets
+  (so the operator does not hold every Secret in memory), and the probe reads the
+  admin Secret and the CA bundle live, not from the cache, so every probe sees the
+  current object. A change to an unlabelled admin or CA Secret does not trigger a
+  probe at once; it is picked up at the next probe interval (one minute by
+  default). ConfigMaps are cached unfiltered, so a CA ConfigMap change probes at
+  once. Do not widen the Secret cache to every Secret for that: it costs memory
+  and widens exposure for a latency gain of at most one interval.
 
 Configuration, as flags with environment defaults:
 
