@@ -486,3 +486,55 @@ func TestDropRole(t *testing.T) {
 		}
 	}
 }
+
+// DropOwnRoles drops the roles of the claim and skips the others, whichever of
+// the three is foreign; a set with nothing of the claim drops nothing.
+func TestDropOwnRoles(t *testing.T) {
+	ctx := context.Background()
+	const claim = "team-a/app/uid-1"
+	for _, tc := range []struct {
+		name    string
+		foreign []int // indexes into the rows: 0 owner, 1 login a, 2 login b
+		skipped []string
+		list    string // the roles that are dropped, "" for none
+	}{
+		{"all ours", nil, nil, `"r", "r_a", "r_b"`},
+		{"login b foreign", []int{2}, []string{"r_b"}, `"r", "r_a"`},
+		{"login a foreign", []int{1}, []string{"r_a"}, `"r", "r_b"`},
+		{"owner foreign", []int{0}, []string{"r"}, `"r_a", "r_b"`},
+		{"owner and login a foreign", []int{0, 1}, []string{"r", "r_a"}, `"r_b"`},
+		{"only the owner is ours", []int{1, 2}, []string{"r_a", "r_b"}, `"r"`},
+		{"all foreign", []int{0, 1, 2}, []string{"r", "r_a", "r_b"}, ""},
+	} {
+		name := tc.name
+		f := &fakePG{rows: roleRows("r", true)}
+		for _, i := range tc.foreign {
+			f.rows[0].rows[i]["comment"] = markerPrefix + "someone/else/uid"
+		}
+		if len(tc.foreign) == 1 && tc.foreign[0] == 2 {
+			f.rows[0].rows[2]["comment"] = "" // no marker at all
+		}
+		skipped, err := f.admin().DropOwnRoles(ctx, "r", claim, "db")
+		if err != nil || !slices.Equal(skipped, tc.skipped) {
+			t.Errorf("%s: skipped %v, %v", name, skipped, err)
+		}
+		if tc.list == "" {
+			f.wantNot(t, "DROP", "terminate", "REASSIGN")
+			continue
+		}
+		if !slices.Contains(f.stmts, "|DROP ROLE IF EXISTS "+tc.list) ||
+			!slices.Contains(f.stmts, "db|REASSIGN OWNED BY "+tc.list+" TO CURRENT_USER") {
+			t.Errorf("%s: statements %v", name, f.stmts)
+		}
+	}
+
+	// A failing drop or read is reported.
+	f := &fakePG{rows: roleRows("r", true), failOn: "DROP ROLE"}
+	if _, err := f.admin().DropOwnRoles(ctx, "r", claim, "db"); !errors.Is(err, errBoom) {
+		t.Errorf("failing drop: %v", err)
+	}
+	f = &fakePG{failOn: "pg_roles"}
+	if _, err := f.admin().DropOwnRoles(ctx, "r", claim, "db"); !errors.Is(err, errBoom) {
+		t.Errorf("failing read: %v", err)
+	}
+}

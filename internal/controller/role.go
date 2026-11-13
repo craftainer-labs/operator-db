@@ -199,9 +199,10 @@ func (e *roleExternal) foreign(refusal error) error {
 // active one can log in, and the marker names this claim and its privileges.
 //
 // While the claim is being deleted, a role that is not its own (any of the
-// three) is not refused but left out: the claim is released and no role is
-// dropped, not even one of its own next to a foreign one (DropRole refuses the
-// whole set then).
+// three) is not refused but left out: Delete drops the roles that are its own
+// and skips the others (DropOwnRoles), and a set with none of its own is
+// released without a drop. A login of ours is dropped even when the owner role
+// next to it is foreign, because it would be a live credential left behind.
 func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec) (lifecycle.Observation[pgclient.RoleState], error) {
 	none := lifecycle.Observation[pgclient.RoleState]{}
 	// Reconcile adds the finalizer with a patch that replaces the claim with
@@ -216,14 +217,26 @@ func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpe
 	}
 	// A role is created together with its marker, so one that exists without
 	// ours is not ours, whichever of the three it is.
+	ours := false
 	for _, r := range []struct {
 		name string
 		info pgclient.RoleInfo
 	}{{e.base, st.Base}, {pgclient.LoginName(e.base, pgclient.GenA), st.A}, {pgclient.LoginName(e.base, pgclient.GenB), st.B}} {
-		if r.info.Exists && r.info.Marker.Claim != e.id {
-			return none, e.foreign(fmt.Errorf("%w: role %q belongs to another claim or is not managed by this operator",
-				lifecycle.ErrNameCollision, r.name))
+		if !r.info.Exists {
+			continue
 		}
+		if r.info.Marker.Claim != e.id {
+			if err := e.foreign(fmt.Errorf("%w: role %q belongs to another claim or is not managed by this operator",
+				lifecycle.ErrNameCollision, r.name)); err != nil {
+				return none, err
+			}
+			continue
+		}
+		ours = true
+	}
+	if !e.claim.DeletionTimestamp.IsZero() {
+		// Only what is ours is dropped (Delete); none of it means nothing to do.
+		return lifecycle.Observation[pgclient.RoleState]{Exists: ours, Current: st}, nil
 	}
 	if !st.Base.Exists {
 		return none, nil
@@ -282,9 +295,14 @@ func (e *roleExternal) Update(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec
 	return e.issue(ctx, activeOf(cur.Marker))
 }
 
-// Delete implements lifecycle.External: every generation goes with the claim.
+// Delete implements lifecycle.External: every generation that is the claim's
+// goes with it; a role of the set that is not is skipped.
 func (e *roleExternal) Delete(ctx context.Context, _ pgclient.RoleState) error {
-	return e.be.admin.DropRole(ctx, e.base, e.id, e.database)
+	skipped, err := e.be.admin.DropOwnRoles(ctx, e.base, e.id, e.database)
+	if len(skipped) > 0 {
+		log.FromContext(ctx).Info("roles that are not this claim's were left alone", "roles", skipped)
+	}
+	return err
 }
 
 // RotateBegin implements lifecycle.Rotator: the new generation is the login

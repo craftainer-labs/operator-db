@@ -25,7 +25,8 @@ away from another tenant's objects:
   object alone and releases the finalizer: a claim whose status records no
   create is released without contacting the server, and one that does is
   released over an object whose marker names another claim as if there were
-  none;
+  none. Of a role set (owner role and two logins) the roles of the claim are
+  dropped and the foreign ones skipped;
 - a cluster server serves only the namespaces its `allowedNamespaces`
   admits (`server.Resolve`), and a namespaced server only its own.
 

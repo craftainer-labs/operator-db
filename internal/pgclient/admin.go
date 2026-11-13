@@ -444,11 +444,24 @@ func (a Admin) Retire(ctx context.Context, base, gen string) error {
 // and drops nothing then, whatever the caller believes it created, so a role
 // the operator did not create is never dropped.
 func (a Admin) DropRole(ctx context.Context, base, claim, database string) error {
+	_, err := a.dropRoles(ctx, base, claim, database, false)
+	return err
+}
+
+// DropOwnRoles is DropRole for a set that may be partly foreign: the roles
+// whose marker names claim are dropped, the others (the owner role, or a login)
+// are left alone, and their names are returned as skipped. A set with nothing of
+// claim in it drops nothing.
+func (a Admin) DropOwnRoles(ctx context.Context, base, claim, database string) (skipped []string, err error) {
+	return a.dropRoles(ctx, base, claim, database, true)
+}
+
+func (a Admin) dropRoles(ctx context.Context, base, claim, database string, skipForeign bool) ([]string, error) {
 	st, err := a.Role(ctx, base)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var idents, literals []string
+	var idents, literals, skipped []string
 	for name, info := range map[string]RoleInfo{
 		base: st.Base, LoginName(base, GenA): st.A, LoginName(base, GenB): st.B,
 	} {
@@ -456,17 +469,26 @@ func (a Admin) DropRole(ctx context.Context, base, claim, database string) error
 			continue
 		}
 		if info.Marker.Claim != claim {
-			return fmt.Errorf("%w: %q", ErrNotOwned, name)
+			if skipForeign {
+				skipped = append(skipped, name)
+				continue
+			}
+			return nil, fmt.Errorf("%w: %q", ErrNotOwned, name)
 		}
 		idents, literals = append(idents, Ident(name)), append(literals, Literal(name))
 	}
+	slices.Sort(skipped)
+	return skipped, a.dropListed(ctx, idents, literals, database)
+}
+
+func (a Admin) dropListed(ctx context.Context, idents, literals []string, database string) error {
 	if len(idents) == 0 {
 		return nil
 	}
 	slices.Sort(idents)
 	slices.Sort(literals)
 	list := strings.Join(idents, ", ")
-	err = a.with(ctx, "", func(s Session) error {
+	err := a.with(ctx, "", func(s Session) error {
 		_, err := s.Query(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ("+
 			strings.Join(literals, ", ")+")")
 		return err

@@ -92,8 +92,10 @@ always quoted with `pgx.Identifier`, and extension names must match
   watch through a field index), so a role waiting for its `Database` goes on as
   soon as the `Database` has its name.
 - Deleting a `DatabaseRole` checks the ownership marker of its roles again
-  before dropping them, so a role the claim did not create is refused
-  (`ErrNotOwned`) whatever the caller believes.
+  before dropping them, so a role the claim did not create is never dropped
+  whatever the caller believes: `pgclient.DropRole` refuses such a set
+  (`ErrNotOwned`) and `DropOwnRoles`, which the controller uses, drops the
+  roles of the claim and skips the others.
 - Deleting a claim (`DEFAULT_DATA_DELETION_POLICY` and `deletionPolicy` apply
   to what the claim owns, as before):
   - A claim that never issued a create on the server (`status.externalId` is
@@ -101,10 +103,13 @@ always quoted with `pgx.Identifier`, and extension names must match
     claim stuck as `NameCollision` is such a claim.
   - A claim that did issue one deletes only what is its own. A database whose
     marker names another claim is skipped and the finalizer is released,
-    whatever the policy. For a `DatabaseRole`, a role of the set (the owner
-    role and the logins `_a` and `_b`) that is not the claim's makes the
-    whole set foreign: none of it is dropped and the claim is released, because
-    dropping the rest would need to know which part is ours. A server that
+    whatever the policy. For a `DatabaseRole`, each role of the set (the owner
+    role and the logins `_a` and `_b`) is checked on its own: the roles whose
+    marker names the claim are dropped and the ones that are another claim's
+    (or have no marker) are skipped, so a login of the claim is never left
+    behind with a live credential next to a foreign role. A set with nothing of
+    the claim in it drops nothing. The claim is released either way.
+    A server that
     cannot be reached still keeps the finalizer for a claim that did issue a
     create.
   - "Issued a create" is `status.externalId`: `create-issued`, written before
