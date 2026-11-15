@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/craftainer-labs/operator-db/internal/egress"
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 )
 
 func target(t *testing.T, fs *fakeServer, ca []byte) Target {

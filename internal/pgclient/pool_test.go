@@ -8,9 +8,8 @@ import (
 
 	"github.com/jackc/puddle/v2"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
-
-	"github.com/craftainer-labs/operator-db/internal/egress"
 )
 
 func TestPoolReusesTheAdminConnection(t *testing.T) {

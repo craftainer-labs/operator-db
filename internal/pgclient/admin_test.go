@@ -12,9 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
-
-	"github.com/craftainer-labs/operator-db/internal/egress"
 )
 
 var errBoom = errors.New("boom")

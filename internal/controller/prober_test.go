@@ -9,10 +9,10 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
-	"github.com/craftainer-labs/operator-db/internal/egress"
 	"github.com/craftainer-labs/operator-db/internal/pgclient"
 )
 

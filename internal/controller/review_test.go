@@ -14,10 +14,10 @@ import (
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
-	"github.com/craftainer-labs/operator-db/internal/egress"
 	"github.com/craftainer-labs/operator-db/internal/pgclient"
 )
 

@@ -14,10 +14,9 @@ import (
 	"net"
 	"time"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-
-	"github.com/craftainer-labs/operator-db/internal/egress"
 )
 
 // ErrInvalidCA means the server's CA bundle holds no certificate.
