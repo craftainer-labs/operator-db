@@ -4,12 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"net"
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/craftainer-labs/operator-db/internal/egress"
 )
 
 func target(t *testing.T, fs *fakeServer, ca []byte) Target {

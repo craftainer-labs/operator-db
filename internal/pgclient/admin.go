@@ -13,9 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
-
-	"github.com/craftainer-labs/operator-db/internal/egress"
 )
 
 var (
