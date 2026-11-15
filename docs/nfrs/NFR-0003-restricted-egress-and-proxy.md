@@ -53,9 +53,10 @@ Plan Decision log, 2026-11-03 (ADR 0002 open items); plan rows EB-3 and EB-5;
 ## Verification
 
 The range tables of both modes and the dialers are covered where the policy
-lives, in lib-operator-go `pkg/egress` (`TestPolicyCheckRegistryRows`, `TestControl`,
+lives, in lib-operator-go `pkg/egress`, v0.3.0 or newer (`TestPolicyCheckRegistryRows`, `TestControl`,
 `TestDirectDialIsCheckedAfterResolution`, `TestHTTPProxyTunnel`, `TestSOCKS5ChecksTheDestination`,
-`TestCheckTarget`, `TestProxyUserinfoAndScheme`). `TestConnectionErrorsAreCoarse` (`internal/pgclient`)
+`TestCheckTarget`, `TestProxyUserinfoAndScheme`).
+In this repository, `TestConnectionErrorsAreCoarse` (`internal/pgclient`)
 and `TestUnreachableServerShowsOnlyACategory` (`internal/controller`) cover the coarse errors;
 `TestValidateServer` (`internal/webhook`) and `TestDatabaseOnAnInvalidServer`
 (`internal/controller`) cover the userinfo
