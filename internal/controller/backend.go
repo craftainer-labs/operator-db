@@ -131,7 +131,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 		}
 	}
 	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, recorder: c.Recorder, spec: spec, conn: conn,
-		host: target.Host, port: int32(target.Port), cloud: obj.cloud, region: obj.discovered[dbv1alpha1.DiscoveredRegion]}, nil
+		host: target.Host, port: int32(target.Port), cloud: obj.cloud, region: obj.region}, nil
 }
 
 // adminTarget is the connection to a server's admin database: its host, port
@@ -160,6 +160,8 @@ type serverObject struct {
 	// discovered is status.discovered, and cloud says spec.provider is set.
 	discovered map[string]string
 	cloud      bool
+	// region is spec.provider.aws.region.
+	region string
 }
 
 // serverKey names a server in the connection cache.
@@ -213,11 +215,11 @@ func (c Config) fetchServer(ctx context.Context, ns string, ref common.ServerRef
 	if ref.Kind == dbv1alpha1.KindClusterDatabaseServer {
 		var s dbv1alpha1.ClusterDatabaseServer
 		err := c.Client.Get(ctx, client.ObjectKey{Name: ref.Name}, &s)
-		return serverObject{s.UID, s.Generation, s.Spec.PostgreSQL, s.Status.Discovered, s.Spec.Provider != nil}, err
+		return serverObject{s.UID, s.Generation, s.Spec.PostgreSQL, s.Status.Discovered, s.Spec.Provider != nil, regionOf(cloudOf(&s))}, err
 	}
 	var s dbv1alpha1.DatabaseServer
 	err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &s)
-	return serverObject{s.UID, s.Generation, s.Spec.PostgreSQL, s.Status.Discovered, s.Spec.Provider != nil}, err
+	return serverObject{s.UID, s.Generation, s.Spec.PostgreSQL, s.Status.Discovered, s.Spec.Provider != nil, regionOf(cloudOf(&s))}, err
 }
 
 // claimID is the claim part of the ownership marker.

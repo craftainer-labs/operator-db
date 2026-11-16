@@ -220,6 +220,30 @@ func TestDiscover(t *testing.T) {
 	if _, err = h.cfg.discover(ctx, cs("absent", ""), server.Connection{}); reasonOf(t, err) != ReasonCredentialsUnavailable {
 		t.Errorf("missing Secret: %v", err)
 	}
+	// A namespaced server cannot use WorkloadIdentity, whatever the CRD says.
+	wi := cloudOf(&dbv1alpha1.DatabaseServer{Spec: dbv1alpha1.DatabaseServerSpec{Provider: &dbv1alpha1.Provider{Type: cloud.ProviderAWS,
+		AWS: &dbv1alpha1.AWSDatabase{AWSBlock: cloud.AWSBlock{Region: "eu-west-1"}}}}})
+	wi.creds = &cloud.Credentials{Source: cloud.SourceWorkloadIdentity}
+	if _, err = h.cfg.discover(ctx, wi, server.Connection{}); reasonOf(t, err) != ReasonCredentialsUnavailable {
+		t.Errorf("namespaced WorkloadIdentity: %v", err)
+	}
+	// A client that is not configured is a category, not a panic.
+	noRDS := h.cfg
+	noRDS.RDS = nil
+	if _, err = noRDS.discover(ctx, cs("aws", ""), server.Connection{}); reasonOf(t, err) != ReasonCloudError {
+		t.Errorf("no RDS client: %v", err)
+	}
+	// An endpoint that is not a host name is refused.
+	api.inst = &rds.DescribeDBInstancesOutput{DBInstances: []rdstypes.DBInstance{{Endpoint: &rdstypes.Endpoint{Address: aws.String("evil host/x")}}}}
+	if _, err = h.cfg.discover(ctx, cs("aws", ""), server.Connection{}); reasonOf(t, err) != ReasonCloudError {
+		t.Errorf("hostile endpoint: %v", err)
+	}
+	api.inst = instanceOut()
+	for h, want := range map[string]bool{"a.b-c.example": true, "": false, "a b": false, "a/b": false, "h:1": false, strings.Repeat("a", 254): false} {
+		if validEndpoint(h) != want {
+			t.Errorf("validEndpoint(%q) = %v", h, !want)
+		}
+	}
 	// With the real constructor the client is the SDK's (no call is made).
 	if NewRDS(aws.Config{Region: "eu-west-1"}) == nil {
 		t.Error("NewRDS")
@@ -240,9 +264,11 @@ func TestRecordAndStatusOf(t *testing.T) {
 	if st.Discovered != nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonTargetNotFound {
 		t.Errorf("failure: %+v %+v", st.Discovered, c)
 	}
+	// A transient failure keeps the last address; a refusal drops it.
+	st.Discovered = map[string]string{"endpoint": "h"}
 	record(srv, cloudOf(srv), nil, errors.New("something else"))
-	if c = meta.FindStatusCondition(st.Conditions, ConditionCloudResolved); c.Reason != ReasonCloudError {
-		t.Errorf("plain error: %+v", c)
+	if c = meta.FindStatusCondition(st.Conditions, ConditionCloudResolved); c.Reason != ReasonCloudError || st.Discovered["endpoint"] != "h" {
+		t.Errorf("plain error: %+v %v", c, st.Discovered)
 	}
 	record(srv, nil, nil, nil)
 	if st.Discovered != nil || meta.FindStatusCondition(st.Conditions, ConditionCloudResolved) != nil {

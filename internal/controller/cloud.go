@@ -131,6 +131,13 @@ func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connect
 	case err != nil:
 		return nil, cloudErr(ReasonCredentialsUnavailable, "the cloud credentials are unavailable")
 	}
+	if c.RDS == nil {
+		return nil, cloudErr(ReasonCloudError, "no RDS client is configured")
+	}
+	// The client is built for this call: release its idle connections after it.
+	if hc, ok := cfg.HTTPClient.(interface{ CloseIdleConnections() }); ok {
+		defer hc.CloseIdleConnections()
+	}
 	return describe(ctx, c.RDS(cfg), cs.target, cfg.Region)
 }
 
@@ -187,6 +194,9 @@ func describe(ctx context.Context, api RDSAPI, t dbv1alpha1.AWSTarget, region st
 	if host == "" {
 		return nil, cloudErr(ReasonCloudError, "the database has no endpoint yet")
 	}
+	if !validEndpoint(host) {
+		return nil, cloudErr(ReasonCloudError, "the database endpoint is not a host name")
+	}
 	d := map[string]string{dbv1alpha1.DiscoveredEndpoint: host, dbv1alpha1.DiscoveredRegion: region}
 	if port != nil {
 		d[dbv1alpha1.DiscoveredPort] = strconv.Itoa(int(*port))
@@ -199,6 +209,20 @@ func describe(ctx context.Context, api RDSAPI, t dbv1alpha1.AWSTarget, region st
 		d[dbv1alpha1.DiscoveredAccountID] = parts[4]
 	}
 	return d, nil
+}
+
+// validEndpoint says whether a host name read from the cloud is a plain DNS
+// name: the admin password is sent to it, so nothing else is accepted.
+func validEndpoint(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	for _, r := range h {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // serverStatusOf returns the status of a server kind of this operator.
@@ -228,14 +252,26 @@ func record(srv server.Server, cs *cloudSpec, disc map[string]string, err error)
 		Message: "the target was found in the cloud", ObservedGeneration: srv.GetGeneration()}
 	if err != nil {
 		var ce *CloudError
-		// A stale address of a target that cannot be resolved now is not kept.
-		st.Discovered = nil
 		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, ReasonCloudError, "the cloud server could not be resolved"
 		if errors.As(err, &ce) {
 			cond.Reason, cond.Message = ce.Reason, ce.msg
+		}
+		// The last address stays through a transient failure (throttling, a
+		// timeout): claims keep working. A target that is gone, or credentials
+		// that are refused, drop it.
+		if cond.Reason != ReasonCloudError {
+			st.Discovered = nil
 		}
 	} else {
 		st.Discovered = disc
 	}
 	meta.SetStatusCondition(&st.Conditions, cond)
+}
+
+// regionOf is the AWS region of a cloud server's spec, "" for a self-hosted one.
+func regionOf(cs *cloudSpec) string {
+	if cs == nil {
+		return ""
+	}
+	return cs.block.Region
 }

@@ -43,6 +43,11 @@ no `discovered` field, and its probe reports only conditions it chooses.
   credentials Secret is read by the controller; on a cluster server it must be
   in the operator's namespace (`CredentialsNamespaceForbidden`), as the admin
   Secret must be.
+- **Address precedence.** `spec.host` (with `spec.port`, default 5432) wins
+  when set; otherwise the discovered endpoint and port are used. A transient
+  cloud failure (throttling, a timeout) keeps the last discovered address; a
+  missing target or refused credentials drop it. A discovered endpoint must be
+  a plain DNS name, since the admin password is sent to it.
 - **Data plane.** The existing pgconn path against the discovered (or
   overridden) address, with the same verified TLS. Password mode reuses the
   role logic of the self-hosted backend; the binding gains `cloud`,
