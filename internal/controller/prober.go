@@ -32,7 +32,13 @@ func (p Prober) Probe(ctx context.Context, srv server.Server, conn server.Connec
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", server.ErrInvalidServer, err)
 	}
-	target, err := adminTarget(spec, conn, dial)
+	cs := cloudOf(srv)
+	disc, derr := p.Config.discover(ctx, cs, conn)
+	record(srv, cs, disc, derr)
+	if derr != nil {
+		return "", derr
+	}
+	target, err := adminTarget(spec, disc, conn, dial)
 	if err != nil {
 		return "", err
 	}

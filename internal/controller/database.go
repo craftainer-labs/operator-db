@@ -57,7 +57,7 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	opts := r.options(err)
 	var ext lifecycle.External[dbv1alpha1.DatabaseSpec, pgclient.DatabaseState]
 	if err == nil {
-		opts.ServerHost = be.spec.Host
+		opts.ServerHost = be.host
 		x := newDatabaseExternal(be, &db)
 		x.persist = func(ctx context.Context) error { return r.Client.Status().Update(ctx, &db) }
 		ext = x

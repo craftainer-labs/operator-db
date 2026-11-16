@@ -59,6 +59,18 @@ spec:
           spec:
             description: spec defines the desired state of DatabaseRole
             properties:
+              authMode:
+                default: Password
+                description: |-
+                  authMode is Password (the default: a generated password) or IAM (a
+                  cloud token; refused until the IAM mode is implemented). Immutable.
+                enum:
+                - Password
+                - IAM
+                type: string
+                x-kubernetes-validations:
+                - message: authMode is immutable
+                  rule: self == oldSelf
               binding:
                 description: Binding configures the binding Secret.
                 properties:
@@ -186,6 +198,8 @@ spec:
             - message: rotationPolicy needs the Update management policy
               rule: '!has(self.rotationPolicy) || self.managementPolicies == [''*'']
                 || ''Update'' in self.managementPolicies'
+            - message: rotationPolicy is not allowed with authMode IAM
+              rule: '!has(self.authMode) || self.authMode == ''Password'' || !has(self.rotationPolicy)'
           status:
             description: status defines the observed state of DatabaseRole
             properties:

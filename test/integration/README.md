@@ -23,6 +23,15 @@ and refused without TLS.
   `scram-sha-256` and a `pg_hba.conf` that accepts only `hostssl` (the local
   socket is trusted inside the container, for initdb and the health check).
 
+- `rds_test.go` (build tags `integration rds`) — the AWS RDS backend: moto
+  server answers the RDS describe calls and the PostgreSQL above is the data
+  plane. Both are reached at a private container address, never loopback, with
+  `allow-private` egress in the test wiring. Needs `MOTO_ENDPOINT`
+  (`http://<ip>:5000`) besides the `PG_*` settings; run by the `rds` job of
+  `.github/workflows/integration.yml` with `-tags integration,rds`. moto does
+  not enforce IAM, so credentials and RDS IAM tokens are untested here
+  ([NFR-0005](../../docs/nfrs/NFR-0005-cloud-credentials-and-egress.md)).
+
 ## Running
 
 In CI, `.github/workflows/integration.yml` generates the certificates, starts

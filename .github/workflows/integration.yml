@@ -27,6 +27,10 @@ concurrency:
 env:
   # renovate: datasource=docker depName=postgres
   PG_IMAGE: postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b
+  # moto server (Apache-2.0): the AWS RDS describe calls of the cloud backend.
+  # Tested by tag and digest; an emulator, never linked (plan Track NK).
+  # renovate: datasource=docker depName=motoserver/moto
+  MOTO_IMAGE: motoserver/moto:5.2.5@sha256:59a1965d845249b04def37a0e2565f9cc6c44543cb89b68e90f28f344b3b0d1a
   # The version scripts/develop.d/10-go.sh installs for the checks lane.
   # renovate: datasource=github-releases depName=golangci/golangci-lint
   GOLANGCI_LINT_VERSION: 2.15.0
@@ -109,3 +113,75 @@ jobs:
       - name: Remove the server
         if: always()
         run: docker rm -f pg
+
+  rds:
+    name: AWS RDS backend (moto and PostgreSQL 18)
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER_AMD64 || 'ubuntu-24.04' }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Generate the CA, the server certificate and the admin password
+        run: |
+          set -euo pipefail
+          test/integration/gen-certs.sh "$RUNNER_TEMP/pg-tls"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/pg-tls/admin-password")"
+
+      # Both containers are reached at their address on the default bridge
+      # network (a private range), never at loopback: pkg/egress blocks
+      # loopback in both modes. EGRESS_MODE=allow-private is in the test's own
+      # wiring, not in the operator's configuration.
+      - name: Start moto and PostgreSQL with TLS
+        run: |
+          set -euo pipefail
+          docker run -d --name moto "$MOTO_IMAGE"
+          docker run -d --name pg \
+            -v "$RUNNER_TEMP/pg-tls:/tls:ro" \
+            -v "$GITHUB_WORKSPACE/test/integration:/it:ro" \
+            -e POSTGRES_PASSWORD_FILE=/tls/admin-password \
+            --entrypoint sh "$PG_IMAGE" /it/pg-entrypoint.sh
+          for _ in $(seq 1 60); do
+            if docker exec pg pg_isready -h /var/run/postgresql -U postgres; then break; fi
+            sleep 1
+          done
+          docker exec pg pg_isready -h /var/run/postgresql -U postgres
+          moto_ip=$(docker inspect -f '{{.NetworkSettings.IPAddress}}' moto)
+          pg_ip=$(docker inspect -f '{{.NetworkSettings.IPAddress}}' pg)
+          echo "MOTO_IP=$moto_ip" >> "$GITHUB_ENV"
+          echo "PG_IP=$pg_ip" >> "$GITHUB_ENV"
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://$moto_ip:5000/moto-api/" >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          docker logs moto
+          echo "moto did not become ready" >&2
+          exit 1
+
+      - name: Run the RDS backend tests
+        run: |
+          set -euo pipefail
+          export MOTO_ENDPOINT="http://$MOTO_IP:5000"
+          export PG_HOST="$PG_IP" PG_PORT=5432 PG_ADMIN_USER=postgres
+          export PG_CA_FILE="$RUNNER_TEMP/pg-tls/ca.crt"
+          export PG_ADMIN_PASSWORD_FILE="$RUNNER_TEMP/pg-tls/admin-password"
+          go test -tags integration,rds -race -count=1 -v -run 'TestRDS' ./test/integration/...
+
+      - name: Show the container logs
+        if: failure()
+        run: |
+          docker logs moto || true
+          docker logs pg || true
+
+      - name: Remove the containers
+        if: always()
+        run: docker rm -f moto pg

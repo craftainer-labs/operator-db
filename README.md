@@ -182,6 +182,24 @@ with TLS (verify-full, scram-sha-256) in the integration lane,
 devcontainer locally); the 100% coverage gate stays on the unit profile. The non-functional requirements are in
 [`docs/nfrs`](docs/nfrs).
 
+## Cloud databases (AWS RDS)
+
+A server can stand for an Amazon RDS instance or Aurora cluster instead of a
+host: set `spec.provider` (`type: AWS`, `aws.region`, and one of
+`aws.dbInstanceIdentifier` or `aws.dbClusterIdentifier`) and optionally
+`spec.credentials` (`source: WorkloadIdentity`, the default on a
+`ClusterDatabaseServer`, or `Secret` with `accessKeyId` and `secretAccessKey`
+keys; a `DatabaseServer` must use `Secret`). `host` is then optional and
+overrides the address the operator reads from the RDS API
+(`status.discovered`). `adminCredentialsSecretRef` is still the administrator
+password the operator runs SQL with. Claims use `authMode: Password`
+(the default); `IAM` is refused with `AuthModeUnsupported` until it is
+implemented. The operator needs `rds:DescribeDBInstances` and
+`rds:DescribeDBClusters`. `endpointOverride` (cluster servers only, and only
+with `EGRESS_MODE=allow-private`) is for emulators. See
+[ADR 0005](docs/adrs/0005-cloud-backends.md) and
+[NFR-0005](docs/nfrs/NFR-0005-cloud-credentials-and-egress.md).
+
 ## Binding Secret
 
 A `DatabaseRole` writes its login to the Secret named by `spec.binding.secretName`
