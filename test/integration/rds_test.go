@@ -28,7 +28,7 @@ import (
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
-	"github.com/craftainer-labs/lib-operator-go/pkg/server"
+	libserver "github.com/craftainer-labs/lib-operator-go/pkg/server"
 
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
 	"github.com/craftainer-labs/operator-db/internal/controller"
@@ -53,7 +53,7 @@ func motoEndpoint(t *testing.T) string {
 
 type rdsHarness struct {
 	cfg  controller.Config
-	conn server.Connection
+	conn libserver.Connection
 	rds  *rds.Client
 	pg   server
 }
@@ -71,7 +71,7 @@ func newRDSHarness(t *testing.T, mode egress.Mode) *rdsHarness {
 		Client: fake.NewClientBuilder().WithObjects(creds).Build(), OperatorNamespace: opsNS,
 		Egress: egress.NewPolicy(mode), EgressMode: mode, RDS: controller.NewRDS, Connect: pgclient.Connect,
 	}
-	h.conn = server.Connection{
+	h.conn = libserver.Connection{
 		Admin:    map[string][]byte{controller.AdminUsernameKey: []byte(pg.user), controller.AdminPasswordKey: []byte(pg.password)},
 		CABundle: pg.ca, ServerName: tlsServer, MinTLSVersion: 0x0304,
 	}
