@@ -74,7 +74,9 @@ func (e *CloudError) Error() string { return e.Reason + ": " + e.msg }
 
 func cloudErr(reason, msg string) error { return &CloudError{Reason: reason, msg: msg} }
 
-func transientErr(reason, msg string) error { return &CloudError{Reason: reason, msg: msg, transient: true} }
+func transientErr(reason, msg string) error {
+	return &CloudError{Reason: reason, msg: msg, transient: true}
+}
 
 // RDSAPI is the part of the RDS client the operator uses.
 type RDSAPI interface {

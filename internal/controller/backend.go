@@ -216,12 +216,12 @@ func (c Config) fetchServer(ctx context.Context, ns string, ref common.ServerRef
 		var s dbv1alpha1.ClusterDatabaseServer
 		err := c.Client.Get(ctx, client.ObjectKey{Name: ref.Name}, &s)
 		return serverObject{uid: s.UID, generation: s.Generation, spec: s.Spec.PostgreSQL, discovered: s.Status.Discovered,
-			cloud: s.Spec.Provider != nil, region: regionOf(cloudOf(&s))}, err
+		cloud: s.Spec.Provider != nil, region: regionOf(cloudOf(&s))}, err
 	}
 	var s dbv1alpha1.DatabaseServer
 	err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &s)
 	return serverObject{uid: s.UID, generation: s.Generation, spec: s.Spec.PostgreSQL, discovered: s.Status.Discovered,
-			cloud: s.Spec.Provider != nil, region: regionOf(cloudOf(&s))}, err
+		cloud: s.Spec.Provider != nil, region: regionOf(cloudOf(&s))}, err
 }
 
 // claimID is the claim part of the ownership marker.
