@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	rdstypes "github.com/aws/aws-sdk-go-v2/service/rds/types"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -62,12 +64,17 @@ var (
 type CloudError struct {
 	Reason string
 	msg    string
+	// transient says the failure may pass by itself (the API throttled or
+	// timed out): the last discovered address is kept through it.
+	transient bool
 }
 
 // Error implements error.
 func (e *CloudError) Error() string { return e.Reason + ": " + e.msg }
 
 func cloudErr(reason, msg string) error { return &CloudError{Reason: reason, msg: msg} }
+
+func transientErr(reason, msg string) error { return &CloudError{Reason: reason, msg: msg, transient: true} }
 
 // RDSAPI is the part of the RDS client the operator uses.
 type RDSAPI interface {
@@ -119,6 +126,9 @@ func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connect
 	if cs == nil {
 		return nil, nil
 	}
+	if c.RDS == nil {
+		return nil, cloudErr(ReasonCloudError, "no RDS client is configured")
+	}
 	secret, err := c.cloudSecret(ctx, cs)
 	if err != nil {
 		return nil, err
@@ -130,9 +140,6 @@ func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connect
 		return nil, cloudErr(ReasonEndpointOverrideForbidden, "endpointOverride is not allowed here")
 	case err != nil:
 		return nil, cloudErr(ReasonCredentialsUnavailable, "the cloud credentials are unavailable")
-	}
-	if c.RDS == nil {
-		return nil, cloudErr(ReasonCloudError, "no RDS client is configured")
 	}
 	// The client is built for this call: release its idle connections after it.
 	if hc, ok := cfg.HTTPClient.(interface{ CloseIdleConnections() }); ok {
@@ -156,7 +163,10 @@ func (c Config) cloudSecret(ctx context.Context, cs *cloudSpec) (map[string][]by
 	}
 	var s corev1.Secret
 	if err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: cs.creds.SecretRef.Name}, &s); err != nil {
-		return nil, cloudErr(ReasonCredentialsUnavailable, "the credentials Secret could not be read")
+		if apierrors.IsNotFound(err) {
+			return nil, cloudErr(ReasonCredentialsUnavailable, "the credentials Secret could not be read")
+		}
+		return nil, transientErr(ReasonCredentialsUnavailable, "the credentials Secret could not be read")
 	}
 	return s.Data, nil
 }
@@ -172,7 +182,7 @@ func describe(ctx context.Context, api RDSAPI, t dbv1alpha1.AWSTarget, region st
 		case errors.As(err, &nf) || (err == nil && len(out.DBClusters) == 0):
 			return nil, cloudErr(ReasonTargetNotFound, "the DB cluster does not exist")
 		case err != nil:
-			return nil, cloudErr(ReasonCloudError, "the RDS API call failed")
+			return nil, transientErr(ReasonCloudError, "the RDS API call failed")
 		}
 		cl := out.DBClusters[0]
 		host, port, arn, id = aws.ToString(cl.Endpoint), cl.Port, aws.ToString(cl.DBClusterArn), aws.ToString(cl.DbClusterResourceId)
@@ -183,7 +193,7 @@ func describe(ctx context.Context, api RDSAPI, t dbv1alpha1.AWSTarget, region st
 		case errors.As(err, &nf) || (err == nil && len(out.DBInstances) == 0):
 			return nil, cloudErr(ReasonTargetNotFound, "the DB instance does not exist")
 		case err != nil:
-			return nil, cloudErr(ReasonCloudError, "the RDS API call failed")
+			return nil, transientErr(ReasonCloudError, "the RDS API call failed")
 		}
 		in := out.DBInstances[0]
 		if in.Endpoint != nil {
@@ -212,14 +222,24 @@ func describe(ctx context.Context, api RDSAPI, t dbv1alpha1.AWSTarget, region st
 }
 
 // validEndpoint says whether a host name read from the cloud is a plain DNS
-// name: the admin password is sent to it, so nothing else is accepted.
+// name (labels of 1 to 63 letters, digits and inner hyphens), not an IP
+// literal: the admin password is sent to it, so nothing else is accepted.
 func validEndpoint(h string) bool {
-	if h == "" || len(h) > 253 {
+	if len(h) > 253 {
 		return false
 	}
-	for _, r := range h {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '.' {
+	if _, err := netip.ParseAddr(h); err == nil {
+		return false
+	}
+	labels := strings.Split(h, ".")
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
 			return false
+		}
+		for _, r := range l {
+			if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' {
+				return false
+			}
 		}
 	}
 	return true
@@ -248,6 +268,8 @@ func record(srv server.Server, cs *cloudSpec, disc map[string]string, err error)
 		meta.RemoveStatusCondition(&st.Conditions, ConditionCloudResolved)
 		return
 	}
+	prev := meta.FindStatusCondition(st.Conditions, ConditionCloudResolved)
+	current := prev != nil && prev.ObservedGeneration == srv.GetGeneration()
 	cond := metav1.Condition{Type: ConditionCloudResolved, Status: metav1.ConditionTrue, Reason: ReasonResolved,
 		Message: "the target was found in the cloud", ObservedGeneration: srv.GetGeneration()}
 	if err != nil {
@@ -255,11 +277,13 @@ func record(srv server.Server, cs *cloudSpec, disc map[string]string, err error)
 		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, ReasonCloudError, "the cloud server could not be resolved"
 		if errors.As(err, &ce) {
 			cond.Reason, cond.Message = ce.Reason, ce.msg
+		} else {
+			ce = nil
 		}
 		// The last address stays through a transient failure (throttling, a
-		// timeout): claims keep working. A target that is gone, or credentials
-		// that are refused, drop it.
-		if cond.Reason != ReasonCloudError {
+		// timeout) while the spec is the one it was read for: claims keep
+		// working. Anything else, or a changed spec, drops it.
+		if ce == nil || !ce.transient || !current {
 			st.Discovered = nil
 		}
 	} else {

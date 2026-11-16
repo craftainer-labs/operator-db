@@ -12,6 +12,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
@@ -129,6 +131,9 @@ func TestCloudOf(t *testing.T) {
 		cloudOf(&dbv1alpha1.DatabaseServer{Spec: dbv1alpha1.DatabaseServerSpec{Provider: &dbv1alpha1.Provider{}}}) != nil {
 		t.Error("a provider without a block has a cloud spec")
 	}
+	if regionOf(nil) != "" || firstNonEmpty("", "b") != "b" || firstNonEmpty("a", "b") != "a" {
+		t.Error("regionOf, firstNonEmpty")
+	}
 	if cloudOf(nil) != nil {
 		t.Error("an unknown kind has a cloud spec")
 	}
@@ -180,6 +185,20 @@ func TestCloudSecret(t *testing.T) {
 	}
 	if _, err = h.cfg.cloudSecret(ctx, secretCS(cloud.ScopeCluster, "", h.ops, "absent")); reasonOf(t, err) != ReasonCredentialsUnavailable {
 		t.Errorf("missing Secret: %v", err)
+	}
+	// An API server failure is transient (the discovered address is kept).
+	wc, cerr := client.NewWithWatch(env.Config, client.Options{Scheme: env.Scheme})
+	h.must(cerr)
+	flaky := h.cfg
+	flaky.Client = interceptor.NewClient(wc, interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("api server down")
+		},
+	})
+	_, err = flaky.cloudSecret(ctx, secretCS(cloud.ScopeCluster, "", h.ops, "aws"))
+	var ce *CloudError
+	if !errors.As(err, &ce) || !ce.transient || ce.Reason != ReasonCredentialsUnavailable {
+		t.Errorf("API failure: %v", err)
 	}
 }
 
@@ -239,7 +258,7 @@ func TestDiscover(t *testing.T) {
 		t.Errorf("hostile endpoint: %v", err)
 	}
 	api.inst = instanceOut()
-	for h, want := range map[string]bool{"a.b-c.example": true, "": false, "a b": false, "a/b": false, "h:1": false, strings.Repeat("a", 254): false} {
+	for h, want := range map[string]bool{"a.b-c.example": true, "": false, "127.0.0.1": false, "::1": false, "a..b": false, "-a.b": false, "a-.b": false, strings.Repeat("a", 64): false, "a b": false, "a/b": false, "h:1": false, strings.Repeat("a", 254): false} {
 		if validEndpoint(h) != want {
 			t.Errorf("validEndpoint(%q) = %v", h, !want)
 		}
@@ -264,10 +283,22 @@ func TestRecordAndStatusOf(t *testing.T) {
 	if st.Discovered != nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonTargetNotFound {
 		t.Errorf("failure: %+v %+v", st.Discovered, c)
 	}
-	// A transient failure keeps the last address; a refusal drops it.
+	// A transient failure keeps the last address while the spec is the same,
+	// and drops it when the spec changed; a plain error drops it.
+	st.Discovered = map[string]string{"endpoint": "h"}
+	record(srv, cloudOf(srv), nil, transientErr(ReasonCloudError, "x"))
+	record(srv, cloudOf(srv), nil, transientErr(ReasonCloudError, "x"))
+	if c = meta.FindStatusCondition(st.Conditions, ConditionCloudResolved); c.Reason != ReasonCloudError || st.Discovered["endpoint"] != "h" {
+		t.Errorf("transient: %+v %v", c, st.Discovered)
+	}
+	srv.Generation = 4
+	record(srv, cloudOf(srv), nil, transientErr(ReasonCloudError, "x"))
+	if st.Discovered != nil {
+		t.Errorf("transient after a spec change kept %v", st.Discovered)
+	}
 	st.Discovered = map[string]string{"endpoint": "h"}
 	record(srv, cloudOf(srv), nil, errors.New("something else"))
-	if c = meta.FindStatusCondition(st.Conditions, ConditionCloudResolved); c.Reason != ReasonCloudError || st.Discovered["endpoint"] != "h" {
+	if c = meta.FindStatusCondition(st.Conditions, ConditionCloudResolved); c.Reason != ReasonCloudError || st.Discovered != nil {
 		t.Errorf("plain error: %+v %v", c, st.Discovered)
 	}
 	record(srv, nil, nil, nil)

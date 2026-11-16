@@ -63,7 +63,7 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 		if role.DeletionTimestamp.IsZero() {
 			x.pre = derr
-			if role.Spec.AuthMode == dbv1alpha1.AuthModeIAM && derr == nil {
+			if role.Spec.AuthMode == dbv1alpha1.AuthModeIAM {
 				x.pre = ErrAuthModeUnsupported
 				if r.Recorder != nil {
 					r.Recorder.Eventf(&role, nil, corev1.EventTypeWarning, ReasonAuthModeUnsupported, "Reconcile", "%s", ErrAuthModeUnsupported.Error())
