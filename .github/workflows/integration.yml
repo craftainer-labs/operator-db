@@ -150,11 +150,14 @@ jobs:
             -v "$GITHUB_WORKSPACE/test/integration:/it:ro" \
             -e POSTGRES_PASSWORD_FILE=/tls/admin-password \
             --entrypoint sh "$PG_IMAGE" /it/pg-entrypoint.sh
+          # Over TCP: the temporary server initdb starts listens on the socket
+          # only, so the answer here is the real server's.
+          ready=
           for _ in $(seq 1 60); do
-            if docker exec pg pg_isready -h /var/run/postgresql -U postgres; then break; fi
+            if docker exec pg pg_isready -h 127.0.0.1 -U postgres; then ready=1; break; fi
             sleep 1
           done
-          docker exec pg pg_isready -h /var/run/postgresql -U postgres
+          if [ -z "$ready" ]; then docker logs pg; echo "PostgreSQL did not become ready" >&2; exit 1; fi
           moto_ip=$(docker inspect -f '{{.NetworkSettings.IPAddress}}' moto)
           pg_ip=$(docker inspect -f '{{.NetworkSettings.IPAddress}}' pg)
           echo "MOTO_IP=$moto_ip" >> "$GITHUB_ENV"
