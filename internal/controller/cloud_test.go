@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	rdstypes "github.com/aws/aws-sdk-go-v2/service/rds/types"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -192,13 +193,23 @@ func TestCloudSecret(t *testing.T) {
 	flaky := h.cfg
 	flaky.Client = interceptor.NewClient(wc, interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			return errors.New("api server down")
+			return apierrors.NewServiceUnavailable("api server down")
 		},
 	})
 	_, err = flaky.cloudSecret(ctx, secretCS(cloud.ScopeCluster, "", h.ops, "aws"))
 	var ce *CloudError
 	if !errors.As(err, &ce) || !ce.transient || ce.Reason != ReasonCredentialsUnavailable {
 		t.Errorf("API failure: %v", err)
+	}
+	// Forbidden is not transient.
+	flaky.Client = interceptor.NewClient(wc, interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return apierrors.NewForbidden(corev1.Resource("secrets"), "aws", errors.New("no"))
+		},
+	})
+	_, err = flaky.cloudSecret(ctx, secretCS(cloud.ScopeCluster, "", h.ops, "aws"))
+	if !errors.As(err, &ce) || ce.transient {
+		t.Errorf("forbidden: %v", err)
 	}
 }
 
@@ -258,7 +269,7 @@ func TestDiscover(t *testing.T) {
 		t.Errorf("hostile endpoint: %v", err)
 	}
 	api.inst = instanceOut()
-	for h, want := range map[string]bool{"a.b-c.example": true, "": false, "127.0.0.1": false, "::1": false, "a..b": false, "-a.b": false, "a-.b": false, strings.Repeat("a", 64): false, "a b": false, "a/b": false, "h:1": false, strings.Repeat("a", 254): false} {
+	for h, want := range map[string]bool{"a.b-c.example": true, "2130706433": false, "a.0x7f": false, "a.123": false, "": false, "127.0.0.1": false, "::1": false, "a..b": false, "-a.b": false, "a-.b": false, strings.Repeat("a", 64): false, "a b": false, "a/b": false, "h:1": false, strings.Repeat("a", 254): false} {
 		if validEndpoint(h) != want {
 			t.Errorf("validEndpoint(%q) = %v", h, !want)
 		}
@@ -383,4 +394,34 @@ func TestCloudServerBackendAndBinding(t *testing.T) {
 		t.Errorf("IAM: %v", err)
 	}
 	h.fake.wantNot(t, "CREATE ROLE")
+}
+
+type codedErr struct{ code string }
+
+func (e codedErr) Error() string     { return "coded" }
+func (e codedErr) ErrorCode() string { return e.code }
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+func TestRDSErrorClassification(t *testing.T) {
+	transient := func(err error) bool {
+		var ce *CloudError
+		return errors.As(rdsErr(err), &ce) && ce.transient
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"throttled": {codedErr{"Throttling"}, true}, "limit": {codedErr{"RequestLimitExceeded"}, true},
+		"denied": {codedErr{"AccessDenied"}, false}, "expired": {codedErr{"ExpiredToken"}, false},
+		"deadline": {context.DeadlineExceeded, true}, "network": {timeoutErr{}, true}, "plain": {errors.New("x"), false},
+	} {
+		if transient(tc.err) != tc.want {
+			t.Errorf("%s: transient = %v", name, !tc.want)
+		}
+	}
 }

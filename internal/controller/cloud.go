@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -74,6 +75,24 @@ func (e *CloudError) Error() string { return e.Reason + ": " + e.msg }
 
 func cloudErr(reason, msg string) error { return &CloudError{Reason: reason, msg: msg} }
 
+// rdsErr classifies a failed RDS call: throttling, timeouts and 5xx-type codes
+// are transient (the last address is kept), everything else (access denied,
+// expired credentials, bad requests) is not.
+func rdsErr(err error) error {
+	var api interface{ ErrorCode() string }
+	var ne net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) {
+		return transientErr(ReasonCloudError, "the RDS API call failed")
+	}
+	if errors.As(err, &api) {
+		switch api.ErrorCode() {
+		case "Throttling", "ThrottlingException", "RequestLimitExceeded", "RequestTimeout", "ServiceUnavailable", "InternalFailure":
+			return transientErr(ReasonCloudError, "the RDS API call failed")
+		}
+	}
+	return cloudErr(ReasonCloudError, "the RDS API call failed")
+}
+
 func transientErr(reason, msg string) error {
 	return &CloudError{Reason: reason, msg: msg, transient: true}
 }
@@ -128,9 +147,6 @@ func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connect
 	if cs == nil {
 		return nil, nil
 	}
-	if c.RDS == nil {
-		return nil, cloudErr(ReasonCloudError, "no RDS client is configured")
-	}
 	secret, err := c.cloudSecret(ctx, cs)
 	if err != nil {
 		return nil, err
@@ -142,6 +158,9 @@ func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connect
 		return nil, cloudErr(ReasonEndpointOverrideForbidden, "endpointOverride is not allowed here")
 	case err != nil:
 		return nil, cloudErr(ReasonCredentialsUnavailable, "the cloud credentials are unavailable")
+	}
+	if c.RDS == nil {
+		return nil, cloudErr(ReasonCloudError, "no RDS client is configured")
 	}
 	// The client is built for this call: release its idle connections after it.
 	if hc, ok := cfg.HTTPClient.(interface{ CloseIdleConnections() }); ok {
@@ -165,10 +184,11 @@ func (c Config) cloudSecret(ctx context.Context, cs *cloudSpec) (map[string][]by
 	}
 	var s corev1.Secret
 	if err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: cs.creds.SecretRef.Name}, &s); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, cloudErr(ReasonCredentialsUnavailable, "the credentials Secret could not be read")
+		if apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) || apierrors.IsTooManyRequests(err) ||
+			apierrors.IsServiceUnavailable(err) || apierrors.IsInternalError(err) {
+			return nil, transientErr(ReasonCredentialsUnavailable, "the credentials Secret could not be read")
 		}
-		return nil, transientErr(ReasonCredentialsUnavailable, "the credentials Secret could not be read")
+		return nil, cloudErr(ReasonCredentialsUnavailable, "the credentials Secret could not be read")
 	}
 	return s.Data, nil
 }
@@ -184,7 +204,7 @@ func describe(ctx context.Context, api RDSAPI, t dbv1alpha1.AWSTarget, region st
 		case errors.As(err, &nf) || (err == nil && len(out.DBClusters) == 0):
 			return nil, cloudErr(ReasonTargetNotFound, "the DB cluster does not exist")
 		case err != nil:
-			return nil, transientErr(ReasonCloudError, "the RDS API call failed")
+			return nil, rdsErr(err)
 		}
 		cl := out.DBClusters[0]
 		host, port, arn, id = aws.ToString(cl.Endpoint), cl.Port, aws.ToString(cl.DBClusterArn), aws.ToString(cl.DbClusterResourceId)
@@ -195,7 +215,7 @@ func describe(ctx context.Context, api RDSAPI, t dbv1alpha1.AWSTarget, region st
 		case errors.As(err, &nf) || (err == nil && len(out.DBInstances) == 0):
 			return nil, cloudErr(ReasonTargetNotFound, "the DB instance does not exist")
 		case err != nil:
-			return nil, transientErr(ReasonCloudError, "the RDS API call failed")
+			return nil, rdsErr(err)
 		}
 		in := out.DBInstances[0]
 		if in.Endpoint != nil {
@@ -234,6 +254,11 @@ func validEndpoint(h string) bool {
 		return false
 	}
 	labels := strings.Split(h, ".")
+	// A last label of digits only, or a hex one, is how a libc resolver
+	// reads an IPv4 address ("2130706433", "0x7f.1").
+	if last := labels[len(labels)-1]; strings.Trim(last, "0123456789") == "" || strings.HasPrefix(strings.ToLower(last), "0x") {
+		return false
+	}
 	for _, l := range labels {
 		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
 			return false
@@ -279,13 +304,11 @@ func record(srv server.Server, cs *cloudSpec, disc map[string]string, err error)
 		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, ReasonCloudError, "the cloud server could not be resolved"
 		if errors.As(err, &ce) {
 			cond.Reason, cond.Message = ce.Reason, ce.msg
-		} else {
-			ce = nil
 		}
 		// The last address stays through a transient failure (throttling, a
 		// timeout) while the spec is the one it was read for: claims keep
 		// working. Anything else, or a changed spec, drops it.
-		if ce == nil || !ce.transient || !current {
+		if !errors.As(err, &ce) || !ce.transient || !current {
 			st.Discovered = nil
 		}
 	} else {
