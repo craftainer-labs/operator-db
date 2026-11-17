@@ -78,14 +78,19 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 }
 
 // checkIAM is the precondition of an IAM-mode claim, in this order: the server
-// must be one whose provider supports IAM (AWS, GCP or Azure;
-// AuthModeUnsupported otherwise, whatever else is wrong), the rotate annotation
+// must be one whose provider supports IAM (AWS, GCP, or Azure with
+// adminAuthMode IAM; AuthModeUnsupported otherwise, whatever else is wrong), the rotate annotation
 // is answered with RotationNotApplicable, iam.principal must fit the provider
 // (refused on AWS, required and valid on GCP and Azure: IAMPrincipalRequired),
 // the Database must be usable (derr) and, on AWS, the ARN of the login must be
 // known. It records the ARN on x.
 func (r *RoleReconciler) checkIAM(role *dbv1alpha1.DatabaseRole, x *roleExternal, derr error) error {
-	if p := x.be.provider; p != cloud.ProviderAWS && p != cloud.ProviderGCP && p != cloud.ProviderAzure {
+	p := x.be.provider
+	// On Azure pgaadauth_create_principal works only for the Entra
+	// administrator, so only a server whose adminAuthMode is IAM (a cluster
+	// server: a namespaced one has no entraAdmin) can create the role.
+	azureNoEntraAdmin := p == cloud.ProviderAzure && (x.be.cs == nil || !x.be.cs.adminIAM)
+	if (p != cloud.ProviderAWS && p != cloud.ProviderGCP && p != cloud.ProviderAzure) || azureNoEntraAdmin {
 		r.warn(role, ReasonAuthModeUnsupported, ErrAuthModeUnsupported.Error())
 		return ErrAuthModeUnsupported
 	}

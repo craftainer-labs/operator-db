@@ -62,7 +62,11 @@ one.
   Azure server (see "AWS IAM mode", "GCP" and "Azure Entra" below). On a server
   that is not one of these (self-hosted) the claim is refused with
   `AuthModeUnsupported` and creates nothing: the gate names the providers that
-  support IAM, it is not "any provider".
+  support IAM, it is not "any provider". On Azure the claim is accepted only
+  when the server's `adminAuthMode` is `IAM`, because
+  `pgaadauth_create_principal` works only for the Entra administrator: a
+  server with a password administrator, and every namespaced server (it has no
+  `entraAdmin`), refuse it with `AuthModeUnsupported` too.
   `authMode` is immutable, and CEL forbids `rotationPolicy` with `IAM`.
 - **Reasons.** The library has no constants for the new reasons; they are local
   (`internal/controller/cloud.go`): `CredentialsNamespaceForbidden`,
@@ -284,6 +288,12 @@ one.
 
 ### Azure Entra (administrator login and IAM mode)
 
+- **Upgrade note: the provider block is fixed.** Both server kinds carry the
+  CEL rule `has(self.provider) == has(oldSelf.provider)`: the `provider` block
+  cannot be added to a self-hosted server or removed from a cloud one on
+  update, besides `provider.type` being immutable. A server moved between
+  self-hosted and cloud must be deleted and recreated, and its claims
+  repointed to the new object.
 - **API.** Both server kinds embed `common.CloudServerCommon`: the CRD shape
   changes only in that `adminCredentialsSecretRef` is optional in the schema,
   and CEL keeps it required except with `adminAuthMode: IAM` (and forbidden

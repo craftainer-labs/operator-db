@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/probe"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
@@ -145,4 +146,23 @@ func TestDatabaseRoleAccessors(t *testing.T) {
 	g.Expect(r.Status.ObservedGeneration).To(Equal(int64(2)))
 	g.Expect(r.Status.LastReconcileTime.Equal(&now)).To(BeTrue())
 	g.Expect(r.Status.LateInitialized).To(Equal(map[string]string{"k": "v"}))
+}
+
+// A namespaced server's cloud credentials Secret is in its own namespace, and
+// only a Secret source names one.
+func TestDatabaseServerCredentialsSecret(t *testing.T) {
+	g := NewWithT(t)
+	s := &DatabaseServer{ObjectMeta: metav1.ObjectMeta{Namespace: "team"}}
+	name, ns := s.GetCredentialsSecret()
+	g.Expect(name + ns).To(BeEmpty())
+	s.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceWorkloadIdentity}
+	name, ns = s.GetCredentialsSecret()
+	g.Expect(name + ns).To(BeEmpty())
+	s.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceSecret}
+	name, ns = s.GetCredentialsSecret()
+	g.Expect(name + ns).To(BeEmpty())
+	s.Spec.Credentials.SecretRef = &cloud.SecretRef{Name: "azure"}
+	name, ns = s.GetCredentialsSecret()
+	g.Expect(name).To(Equal("azure"))
+	g.Expect(ns).To(Equal("team"))
 }

@@ -196,7 +196,7 @@ func TestAzureEntraAdminLogin(t *testing.T) {
 // rotates; deleting reassigns the objects and drops the role.
 func TestAzureIAMRoleLifecycle(t *testing.T) {
 	f := newFakeARM(t)
-	h := azureHarness(t, f)
+	h := entraHarness(t, f)
 	dbr, rr := &DatabaseReconciler{h.cfg}, &RoleReconciler{h.cfg}
 	h.reconcileOK(dbr, h.database("orders", nil))
 	dbName := pgclient.DatabaseName(h.ns, "orders")
@@ -261,7 +261,7 @@ func TestAzureIAMRoleLifecycle(t *testing.T) {
 // the text names no principal.
 func TestAzureIAMPrincipalChecks(t *testing.T) {
 	f := newFakeARM(t)
-	h := azureHarness(t, f)
+	h := entraHarness(t, f)
 	rr := &RoleReconciler{h.cfg}
 	h.reconcileOK(&DatabaseReconciler{h.cfg}, h.database("orders", nil))
 	for name, principal := range map[string]string{
@@ -275,5 +275,58 @@ func TestAzureIAMPrincipalChecks(t *testing.T) {
 		}
 		h.rec.AssertEvent(t, "Warning", ReasonIAMPrincipalRequired, "")
 		h.fake.wantNot(t, "pgaadauth", "COMMENT", "GRANT")
+	}
+}
+
+// An IAM-mode claim is accepted on Azure only when the server's adminAuthMode
+// is IAM, because pgaadauth_create_principal works only for the Entra
+// administrator: a server with a password administrator, and a namespaced
+// server (which has no entraAdmin), refuse it with AuthModeUnsupported and
+// create nothing.
+func TestAzureIAMRoleNeedsEntraAdmin(t *testing.T) {
+	f := newFakeARM(t)
+	h := azureHarness(t, f)
+	rr := &RoleReconciler{h.cfg}
+	h.reconcileOK(&DatabaseReconciler{h.cfg}, h.database("orders", nil))
+	h.fake.reset()
+	h.rec.Reset()
+	role := h.role("orders-iam", "orders", azureIAMClaim(azPrincipal))
+	if err := h.reconcile(rr, role); !errors.Is(err, ErrAuthModeUnsupported) {
+		t.Errorf("password administrator: %v", err)
+	}
+	h.rec.AssertEvent(t, "Warning", ReasonAuthModeUnsupported, "")
+	h.fake.wantNot(t, "pgaadauth", "CREATE ROLE", "COMMENT", "GRANT")
+
+	// A namespaced server has no Entra administrator, whatever its spec says.
+	for name, cs := range map[string]*cloudSpec{
+		"namespaced": {scope: cloud.ScopeNamespaced},
+		"no spec":    nil,
+	} {
+		h.rec.Reset()
+		x := &roleExternal{be: &backend{provider: cloud.ProviderAzure, cs: cs}}
+		if err := rr.checkIAM(role, x, nil); !errors.Is(err, ErrAuthModeUnsupported) {
+			t.Errorf("%s: %v", name, err)
+		}
+		h.rec.AssertEvent(t, "Warning", ReasonAuthModeUnsupported, "")
+	}
+}
+
+// Deleting a claim whose Entra role is someone else's leaves the role alone.
+func TestAzureIAMDeleteSkipsAForeignRole(t *testing.T) {
+	f := newFakeARM(t)
+	h := entraHarness(t, f)
+	rr := &RoleReconciler{h.cfg}
+	h.reconcileOK(&DatabaseReconciler{h.cfg}, h.database("orders", nil))
+	role := h.role("orders-iam", "orders", azureIAMClaim(azPrincipal))
+	h.reconcileOK(rr, role)
+	h.get(role)
+
+	h.fake.answer = iamRoleAnswer(azPrincipal, "other/role/uid", "ReadOnly")
+	h.must(env.Client.Delete(context.Background(), role))
+	h.fake.reset()
+	h.reconcileOK(rr, role)
+	h.fake.wantNot(t, "DROP ROLE", "DROP OWNED", "REASSIGN", "pgaadauth")
+	if !h.gone(role) {
+		t.Error("the claim is still there")
 	}
 }
