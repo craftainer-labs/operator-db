@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -125,11 +126,13 @@ func (f *azureFake) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/.well-known/openid-configuration"):
 		base := f.srv.URL + strings.TrimSuffix(r.URL.Path, "/v2.0/.well-known/openid-configuration")
-		_, _ = fmt.Fprintf(w, `{"issuer":"%[1]s/v2.0","authorization_endpoint":"%[1]s/oauth2/v2.0/authorize","token_endpoint":"%[1]s/oauth2/v2.0/token"}`, base)
+		_ = json.NewEncoder(w).Encode(map[string]string{"issuer": base + "/v2.0",
+			"authorization_endpoint": base + "/oauth2/v2.0/authorize", "token_endpoint": base + "/oauth2/v2.0/token"})
 	case strings.HasSuffix(r.URL.Path, "/token"):
 		_, _ = fmt.Fprint(w, `{"access_token":"fake-entra-token","token_type":"Bearer","expires_in":3600,"ext_expires_in":3600}`)
 	case strings.HasSuffix(r.URL.Path, "/flexibleServers/orders") && !f.missing:
-		_, _ = fmt.Fprintf(w, `{"id":%q,"name":"orders","location":"westeurope","properties":{"state":"Ready","fullyQualifiedDomainName":%q}}`, r.URL.Path, azFQDN)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": r.URL.Path, "name": "orders", "location": "westeurope",
+			"properties": map[string]string{"state": "Ready", "fullyQualifiedDomainName": azFQDN}})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, `{"error":{"code":"ResourceNotFound"}}`)

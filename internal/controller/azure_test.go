@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -85,7 +86,8 @@ func (f *fakeARM) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/.well-known/openid-configuration"):
 		base := f.srv.URL + strings.TrimSuffix(r.URL.Path, "/v2.0/.well-known/openid-configuration")
-		_, _ = io.WriteString(w, `{"issuer":"`+base+`/v2.0","authorization_endpoint":"`+base+`/oauth2/v2.0/authorize","token_endpoint":"`+base+`/oauth2/v2.0/token"}`)
+		_ = json.NewEncoder(w).Encode(map[string]string{"issuer": base + "/v2.0",
+			"authorization_endpoint": base + "/oauth2/v2.0/authorize", "token_endpoint": base + "/oauth2/v2.0/token"})
 	case strings.HasSuffix(r.URL.Path, "/token"):
 		if f.entra != 0 {
 			w.WriteHeader(f.entra)
@@ -118,7 +120,7 @@ func (f *fakeARM) requests() []string {
 }
 
 // serverWith is the recorded server with a replacement of text.
-func serverWith(old, new string) string { return strings.Replace(recordedAzureServer, old, new, 1) }
+func serverWith(old, repl string) string { return strings.Replace(recordedAzureServer, old, repl, 1) }
 
 // azureHarness is a harness whose server is an Azure one, with the fake as its
 // Resource Manager and Entra authority.
@@ -140,7 +142,12 @@ func azureHarness(t *testing.T, f *fakeARM) *harness {
 		Data: map[string][]byte{cloud.KeyAzureClientID: []byte("11111111-1111-4111-8111-111111111111"),
 			cloud.KeyAzureClientSecret: []byte("entra-client-secret")},
 	}))
-	h.cfg.Egress, h.cfg.EgressMode, h.cfg.ARM, h.cfg.CloudRootCAs = egress.Policy{}, egress.ModeAllowPrivate, NewARM, f.roots
+	h.cfg.Egress, h.cfg.EgressMode, h.cfg.CloudRootCAs = egress.Policy{}, egress.ModeAllowPrivate, f.roots
+	// No retries: a 5xx of the fake is answered once, not after the SDK's backoff.
+	h.cfg.ARM = func(c *cloud.AzureClient, sub string) (ARMAPI, error) {
+		c.ClientOptions.Retry = policy.RetryOptions{MaxRetries: -1}
+		return NewARM(c, sub)
+	}
 	h.get(h.server)
 	h.server.Status.Discovered = map[string]string{"endpoint": azFQDN, "port": "5432", "region": "West Europe"}
 	h.must(env.Client.Status().Update(context.Background(), h.server))
@@ -312,8 +319,8 @@ func TestDescribeAzureFailuresAreCategories(t *testing.T) {
 	if e := armErr(refused); reasonOf(t, e) != ReasonCredentialsUnavailable || isTransient(e) {
 		t.Error("a refused credential")
 	}
-	// An authentication error with no response is not an answer of the authority.
-	if e := armErr(&azidentity.AuthenticationFailedError{}); reasonOf(t, e) != ReasonCloudError {
+	// An authentication failure with no response is still a refused credential.
+	if e := armErr(&azidentity.AuthenticationFailedError{}); reasonOf(t, e) != ReasonCredentialsUnavailable {
 		t.Error("an authentication error without a response")
 	}
 }
