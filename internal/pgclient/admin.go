@@ -399,8 +399,8 @@ func (a Admin) apply(ctx context.Context, p RoleParams, stmts, grants []string) 
 }
 
 // ApplyIAMRole is ApplyRole for an IAM-mode claim on RDS (ADR 0005): one login
-// role named Base, without a password (a stored one is cleared) and a member of rds_iam, so
-// the tenant logs in with an IAM token. It gets the same privileges as the
+// role named Base, without a password (a stored one is cleared) and a member
+// of rds_iam, so the tenant logs in with an IAM token. It gets the same privileges as the
 // owner role of ApplyRole, directly. Password is not used.
 //
 // The ownership check comes first and fails closed: a role of that name that

@@ -94,9 +94,16 @@ func TestRDSIAMRole(t *testing.T) {
 		t.Errorf("ReadWrite create table: %v", err)
 	}
 
-	// Applying again with other privileges updates the same role.
+	// A password stored on the claim's role is cleared when it is applied again,
+	// and it is the same role, updated, with other privileges.
+	if err := root.Exec(ctx, "ALTER ROLE "+pgclient.Ident(base)+" PASSWORD 'stale'"); err != nil {
+		t.Fatal(err)
+	}
 	if err := admin.ApplyIAMRole(ctx, params(pgclient.ReadOnly)); err != nil {
 		t.Fatal(err)
+	}
+	if got := one(t, root, "SELECT (rolpassword IS NULL)::text AS none FROM pg_authid WHERE rolname = "+pgclient.Literal(base), "none"); got != "true" {
+		t.Errorf("the stored password was not cleared: none = %q", got)
 	}
 	ro := adminSession(t, admin, db)
 	if err := ro.Exec(ctx, "SET ROLE "+pgclient.Ident(base)); err != nil {

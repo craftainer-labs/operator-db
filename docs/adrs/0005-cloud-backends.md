@@ -90,7 +90,8 @@ no `discovered` field, and its probe reports only conditions it chooses.
   stored password is cleared (`PASSWORD NULL`). Unlike password mode, which
   logs in as a member of a NOLOGIN owner role (`SET role`), the privileges are
   the login's own, as ADR 0002 section 16.4 specifies, so objects an IAM login
-  creates are owned by that login.
+  creates are owned by that login, and deleting the claim reassigns them to the
+  admin role (`REASSIGN OWNED`), as in password mode.
 - **Ownership.** The role is created with the claim marker in one query
   (`COMMENT ON ROLE`, ADR 0002 section 10), and the full marker (with the
   privileges) is written after the grants. The marker is checked before any

@@ -78,7 +78,10 @@ func TestIAMRoleLifecycle(t *testing.T) {
 		`|GRANT CONNECT ON DATABASE "`+dbName+`" TO `+q,
 		dbName+`|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO `+q,
 		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=`+claim+` privileges=ReadWrite'`)
-	h.fake.wantNot(t, `"`+base+`_a"`, `"`+base+`_b"`, "PASSWORD '", "NOLOGIN", "SET role")
+	h.fake.wantNot(t, `"`+base+`_a"`, `"`+base+`_b"`, "NOLOGIN", "SET role")
+	if strings.Contains(strings.ReplaceAll(h.fake.joined(), "PASSWORD NULL", ""), "PASSWORD") {
+		t.Errorf("a password is set:\n%s", h.fake.joined())
+	}
 
 	data := bindingSecret(h, role)
 	arn := "arn:aws:rds-db:eu-west-1:" + iamAccount + ":dbuser:" + iamResource + "/" + base

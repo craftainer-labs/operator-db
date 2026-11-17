@@ -573,7 +573,10 @@ func TestApplyIAMRole(t *testing.T) {
 		`|GRANT CONNECT ON DATABASE "team-a_db_y" TO `+q,
 		`team-a_db_y|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO `+q,
 		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite'`)
-	f.wantNot(t, "PASSWORD '", "NOLOGIN", "SET role")
+	f.wantNot(t, "NOLOGIN", "SET role")
+	if strings.Contains(strings.ReplaceAll(f.joined(), "PASSWORD NULL", ""), "PASSWORD") {
+		t.Errorf("a password is set:\n%s", f.joined())
+	}
 	if last := f.stmts[len(f.stmts)-1]; !strings.HasPrefix(last, `|COMMENT ON ROLE `) {
 		t.Errorf("the marker is not written last: %v", f.stmts)
 	}
