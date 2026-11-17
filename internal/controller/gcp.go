@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"net/netip"
 	"regexp"
@@ -15,7 +14,9 @@ import (
 	"google.golang.org/api/sqladmin/v1"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
+	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
+	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
@@ -31,12 +32,18 @@ const (
 )
 
 // The Cloud SQL Admin API answers a users call with a long-running operation.
-// The operator waits for it, so the marker of a created user is written in the
-// same call (ADR 0005); the interval and the bound are variables for tests.
+// A create is waited for, so the marker of a created user is written in the
+// same call (ADR 0005); the interval and the bound are variables for tests. A
+// delete is not: the claim is requeued after sqlAdminRequeue while the
+// operation runs (lifecycle.Pending).
 var (
 	sqlAdminPoll = time.Second
 	sqlAdminWait = 2 * time.Minute
 )
+
+// sqlAdminRequeue is when a claim whose user deletion is still running looks
+// again.
+const sqlAdminRequeue = 5 * time.Second
 
 // ErrIAMPrincipalInvalid means iam.principal is not a Cloud SQL user name.
 var ErrIAMPrincipalInvalid = errors.New("IAMPrincipalRequired: iam.principal must be the e-mail of a Google account, or of a service account " +
@@ -125,10 +132,7 @@ func httpStatus(err error) int {
 // (access denied, a bad request) is not. The SDK's text is never kept: it names
 // the project, the instance and the principal.
 func sqlAdminErr(err error) error {
-	var ne net.Error
-	st := httpStatus(err)
-	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) ||
-		st == http.StatusTooManyRequests || st == http.StatusRequestTimeout || st >= 500 {
+	if transientCause(err, httpStatus(err)) {
 		return transientErr(ReasonCloudError, "the Cloud SQL Admin API call failed")
 	}
 	return cloudErr(ReasonCloudError, "the Cloud SQL Admin API call failed")
@@ -239,6 +243,15 @@ func pickIP(ips []*sqladmin.IpMapping, allowPrivate bool) string {
 	return firstNonEmpty(public, private)
 }
 
+// operationResult is the outcome of a finished operation: a category when it
+// failed.
+func operationResult(op *sqladmin.Operation) error {
+	if op.Error != nil && len(op.Error.Errors) > 0 {
+		return cloudErr(ReasonCloudError, "the Cloud SQL Admin API operation failed")
+	}
+	return nil
+}
+
 // waitOperation follows a long-running operation of the Admin API until it is
 // done, and returns a category for a failed one. It gives up after
 // sqlAdminWait.
@@ -247,10 +260,7 @@ func waitOperation(ctx context.Context, api SQLAdminAPI, project string, op *sql
 	defer cancel()
 	for {
 		if op.Status == "DONE" {
-			if op.Error != nil && len(op.Error.Errors) > 0 {
-				return cloudErr(ReasonCloudError, "the Cloud SQL Admin API operation failed")
-			}
-			return nil
+			return operationResult(op)
 		}
 		t := time.NewTimer(sqlAdminPoll)
 		select {
@@ -276,15 +286,26 @@ func insertIAMUser(ctx context.Context, api SQLAdminAPI, cs *cloudSpec, name str
 	return waitOperation(ctx, api, cs.gcp.Project, op)
 }
 
-// deleteIAMUser removes the Cloud SQL IAM database user, which drops its role,
-// and waits until it is gone. A user that is gone already is not an error.
+// deleteIAMUser removes the Cloud SQL IAM database user, which drops its role.
+// It does not wait for the operation: while it runs the result is a
+// lifecycle.PendingError, and the next reconcile finds the role gone (the claim
+// is released) or calls again, to which the API answers 404 (gone) or 409 (the
+// instance is busy, still pending). A user that is gone already is not an error.
 func deleteIAMUser(ctx context.Context, api SQLAdminAPI, cs *cloudSpec, name string) error {
 	op, err := api.DeleteUser(ctx, cs.gcp.Project, cs.gcpTarget.Instance, name)
 	switch {
 	case httpStatus(err) == http.StatusNotFound:
 		return nil
+	case httpStatus(err) == http.StatusConflict:
+		return userDeletePending()
 	case err != nil:
 		return sqlAdminErr(err)
+	case op.Status != "DONE":
+		return userDeletePending()
 	}
-	return waitOperation(ctx, api, cs.gcp.Project, op)
+	return operationResult(op)
+}
+
+func userDeletePending() error {
+	return lifecycle.Pending(sqlAdminRequeue, conditions.Deleting, "waiting for the Cloud SQL Admin API to delete the IAM user")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -82,13 +83,28 @@ func (e *CloudError) Error() string { return e.Reason + ": " + e.msg }
 
 func cloudErr(reason, msg string) error { return &CloudError{Reason: reason, msg: msg} }
 
+// transientCause says whether err (an HTTP status of 0 means none) is a failure
+// that may pass by itself, in any cloud: a deadline, a cancelled context (the
+// manager is stopping; says nothing about the cloud), a network error, and an
+// HTTP 408, 429 or 5xx answer. It is the one classifier of rdsErr, sqlAdminErr
+// and armErr.
+func transientCause(err error, status int) bool {
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.As(err, &ne) ||
+		status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= http.StatusInternalServerError
+}
+
 // rdsErr classifies a failed RDS call: throttling, timeouts and 5xx-type codes
 // are transient (the last address is kept), everything else (access denied,
 // expired credentials, bad requests) is not.
 func rdsErr(err error) error {
 	var api interface{ ErrorCode() string }
-	var ne net.Error
-	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) {
+	var resp interface{ HTTPStatusCode() int }
+	status := 0
+	if errors.As(err, &resp) {
+		status = resp.HTTPStatusCode()
+	}
+	if transientCause(err, status) {
 		return transientErr(ReasonCloudError, "the RDS API call failed")
 	}
 	if errors.As(err, &api) {

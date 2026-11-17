@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"maps"
-	"net"
 	"net/http"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -74,7 +73,6 @@ func armStatus(err error) int {
 // request) is not transient. The SDK's text is never kept: it names the
 // subscription, the resource group and the server.
 func armErr(err error) error {
-	var ne net.Error
 	var af *azidentity.AuthenticationFailedError
 	st := armStatus(err)
 	isAuth := errors.As(err, &af)
@@ -82,8 +80,7 @@ func armErr(err error) error {
 		st = af.RawResponse.StatusCode
 	}
 	switch {
-	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.As(err, &ne) ||
-		st == http.StatusTooManyRequests || st == http.StatusRequestTimeout || st >= 500:
+	case transientCause(err, st):
 		return transientErr(ReasonCloudError, "the Azure Resource Manager call failed")
 	case isAuth && af.RawResponse == nil:
 		// The authority gave no answer (a blocked or failed connection, a TLS

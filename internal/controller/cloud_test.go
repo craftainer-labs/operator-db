@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -393,6 +394,11 @@ type codedErr struct{ code string }
 func (e codedErr) Error() string     { return "coded" }
 func (e codedErr) ErrorCode() string { return e.code }
 
+type statusErr struct{ code int }
+
+func (e statusErr) Error() string       { return "status" }
+func (e statusErr) HTTPStatusCode() int { return e.code }
+
 type timeoutErr struct{}
 
 func (timeoutErr) Error() string   { return "timeout" }
@@ -411,6 +417,9 @@ func TestRDSErrorClassification(t *testing.T) {
 		"throttled": {codedErr{"Throttling"}, true}, "limit": {codedErr{"RequestLimitExceeded"}, true},
 		"denied": {codedErr{"AccessDenied"}, false}, "expired": {codedErr{"ExpiredToken"}, false},
 		"deadline": {context.DeadlineExceeded, true}, "network": {timeoutErr{}, true}, "plain": {errors.New("x"), false},
+		// The same verdicts as the other clouds (transientCause).
+		"canceled": {context.Canceled, true}, "wrapped 503": {fmt.Errorf("op: %w", statusErr{503}), true},
+		"429": {statusErr{429}, true}, "408": {statusErr{408}, true}, "403": {statusErr{403}, false},
 	} {
 		if transient(tc.err) != tc.want {
 			t.Errorf("%s: transient = %v", name, !tc.want)
