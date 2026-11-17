@@ -104,6 +104,22 @@ func TestEntraSource(t *testing.T) {
 		t.Fatalf("token = %q, %v", tok, err)
 	}
 
+	// A source that failed to build is built again by the next call, and one
+	// that built is reused.
+	retry := h.cfg.entraSource(cs, server.CloudConnection{Credentials: map[string][]byte{cloud.KeyAzureClientID: []byte("x")}})
+	if _, err = retry(ctx); err == nil {
+		t.Fatal("a bad Secret built a source")
+	}
+	if _, err = retry(ctx); err == nil {
+		t.Error("a failed build was not repeated or not failed again")
+	}
+	reuse := h.cfg.entraSource(cs, cc)
+	for i := 0; i < 2; i++ {
+		if tok, err = reuse(ctx); err != nil || tok != "fake-entra-token" {
+			t.Fatalf("reused source, call %d: %q, %v", i, tok, err)
+		}
+	}
+
 	// The Entra authority refuses the credential.
 	f.mu.Lock()
 	f.entra = 401

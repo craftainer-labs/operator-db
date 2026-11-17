@@ -212,30 +212,38 @@ func (c Config) entraLogin(cs *cloudSpec, cc server.CloudConnection) *entraLogin
 // is not kept.
 func (c Config) entraSource(cs *cloudSpec, cc server.CloudConnection) func(context.Context) (string, error) {
 	var (
-		once    sync.Once
+		mu      sync.Mutex
 		src     *cloud.CachedSource
 		release func()
-		berr    error
 	)
-	return func(ctx context.Context) (string, error) {
-		once.Do(func() {
-			e := cloud.Egress{Mode: c.EgressMode, Policy: c.Egress, Proxy: cc.Proxy, RootCAs: c.CloudRootCAs}
-			ac, err := e.Azure(ctx, cs.scope, cs.azure, cs.creds, cc.Credentials)
-			if err != nil {
-				berr = egressErr(err)
-				return
-			}
-			src = cloud.NewCachedSource(cloud.AzureTokenSource(ac.Credential, cloud.AzurePostgresScope), 0)
-			release = func() {}
-			if hc, ok := ac.ClientOptions.Transport.(interface{ CloseIdleConnections() }); ok {
-				release = hc.CloseIdleConnections
-			}
-		})
-		if berr != nil {
-			return "", berr
+	// build returns the token source, building it on first use. Only a build
+	// that worked is kept: a failed one (a refused override, a Secret not yet
+	// readable, a cancelled context) is tried again by the next connect.
+	build := func(ctx context.Context) (*cloud.CachedSource, func(), error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if src != nil {
+			return src, release, nil
 		}
-		tok, _, err := src.Token(ctx)
-		release()
+		e := cloud.Egress{Mode: c.EgressMode, Policy: c.Egress, Proxy: cc.Proxy, RootCAs: c.CloudRootCAs}
+		ac, err := e.Azure(ctx, cs.scope, cs.azure, cs.creds, cc.Credentials)
+		if err != nil {
+			return nil, nil, egressErr(err)
+		}
+		rel := func() {}
+		if hc, ok := ac.ClientOptions.Transport.(interface{ CloseIdleConnections() }); ok {
+			rel = hc.CloseIdleConnections
+		}
+		src, release = cloud.NewCachedSource(cloud.AzureTokenSource(ac.Credential, cloud.AzurePostgresScope), 0), rel
+		return src, release, nil
+	}
+	return func(ctx context.Context) (string, error) {
+		s, rel, err := build(ctx)
+		if err != nil {
+			return "", err
+		}
+		tok, _, err := s.Token(ctx)
+		rel()
 		if err != nil {
 			// cloud.ErrCredentialsUnavailable: its text is a category.
 			return "", err
