@@ -132,10 +132,18 @@ func (c Config) discoverAzure(ctx context.Context, cs *cloudSpec, conn server.Co
 	return describeAzure(ctx, api, cs)
 }
 
+// recovering says the state passes by itself.
+func recovering(st armpostgresqlflexibleservers.ServerState) bool {
+	return st == armpostgresqlflexibleservers.ServerStateStarting || st == armpostgresqlflexibleservers.ServerStateUpdating
+}
+
 // describeAzure reads the flexible server's host name, region and resource id.
 // The host name is what the server's certificate carries, and the admin
 // password is sent to it, so only a plain DNS name is accepted. A server that is
-// not Ready (stopped, starting, updating) has no usable address for now: a CloudError, transient while it is Starting or Updating.
+// not Ready has no usable address: a CloudError, transient only while it is
+// Starting or Updating (it comes back by itself). Any other state (Stopping,
+// Stopped, Disabled, Dropping, or one Azure adds) is down until somebody acts,
+// and the last address is dropped.
 func describeAzure(ctx context.Context, api ARMAPI, cs *cloudSpec) (map[string]string, error) {
 	srv, err := api.GetServer(ctx, cs.azure.ResourceGroup, cs.azureTarget.ServerName)
 	switch {
@@ -145,16 +153,19 @@ func describeAzure(ctx context.Context, api ARMAPI, cs *cloudSpec) (map[string]s
 		return nil, armErr(err)
 	}
 	p := srv.Properties
-	if p == nil || p.FullyQualifiedDomainName == nil || *p.FullyQualifiedDomainName == "" {
+	if p == nil {
 		return nil, cloudErr(ReasonCloudError, "the flexible server has no host name yet")
 	}
+	// The state comes first: a server that is starting may have no host name
+	// for a moment.
 	if p.State != nil && *p.State != armpostgresqlflexibleservers.ServerStateReady {
-		// Starting and updating pass by themselves, so the last address is kept
-		// through them; a stopped, disabled or dropping server is down until
-		// somebody acts, and drops it.
-		st := *p.State
-		transient := st == armpostgresqlflexibleservers.ServerStateStarting || st == armpostgresqlflexibleservers.ServerStateUpdating
-		return nil, &CloudError{Reason: ReasonCloudError, msg: "the flexible server is not ready", transient: transient}
+		if recovering(*p.State) {
+			return nil, transientErr(ReasonCloudError, "the flexible server is not ready")
+		}
+		return nil, cloudErr(ReasonCloudError, "the flexible server is not ready")
+	}
+	if p.FullyQualifiedDomainName == nil || *p.FullyQualifiedDomainName == "" {
+		return nil, cloudErr(ReasonCloudError, "the flexible server has no host name yet")
 	}
 	host := *p.FullyQualifiedDomainName
 	if !validEndpoint(host) {

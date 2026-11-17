@@ -240,13 +240,17 @@ func TestDescribeAzure(t *testing.T) {
 		body, reason string
 		transient    bool
 	}{
-		"starting":        {serverWith(`"state": "Ready"`, `"state": "Starting"`), ReasonCloudError, true},
-		"updating":        {serverWith(`"state": "Ready"`, `"state": "Updating"`), ReasonCloudError, true},
-		"stopped":         {serverWith(`"state": "Ready"`, `"state": "Stopped"`), ReasonCloudError, false},
-		"no host name":    {serverWith(`"fullyQualifiedDomainName": "`+azFQDN+`"`, `"fullyQualifiedDomainName": ""`), ReasonCloudError, false},
-		"no properties":   {`{"id":"x"}`, ReasonCloudError, false},
-		"address as name": {serverWith(azFQDN, "10.0.0.5"), ReasonCloudError, false},
-		"bad name":        {serverWith(azFQDN, "a_b.example"), ReasonCloudError, false},
+		"starting":               {serverWith(`"state": "Ready"`, `"state": "Starting"`), ReasonCloudError, true},
+		"updating":               {serverWith(`"state": "Ready"`, `"state": "Updating"`), ReasonCloudError, true},
+		"stopped":                {serverWith(`"state": "Ready"`, `"state": "Stopped"`), ReasonCloudError, false},
+		"stopping":               {serverWith(`"state": "Ready"`, `"state": "Stopping"`), ReasonCloudError, false},
+		"disabled":               {serverWith(`"state": "Ready"`, `"state": "Disabled"`), ReasonCloudError, false},
+		"dropping":               {serverWith(`"state": "Ready"`, `"state": "Dropping"`), ReasonCloudError, false},
+		"starting, no host name": {`{"properties":{"state":"Starting"}}`, ReasonCloudError, true},
+		"no host name":           {serverWith(`"fullyQualifiedDomainName": "`+azFQDN+`"`, `"fullyQualifiedDomainName": ""`), ReasonCloudError, false},
+		"no properties":          {`{"id":"x"}`, ReasonCloudError, false},
+		"address as name":        {serverWith(azFQDN, "10.0.0.5"), ReasonCloudError, false},
+		"bad name":               {serverWith(azFQDN, "a_b.example"), ReasonCloudError, false},
 	} {
 		f.server = tc.body
 		_, err := h.cfg.discover(ctx, cs, server.Connection{})
