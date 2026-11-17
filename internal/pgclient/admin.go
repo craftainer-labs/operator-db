@@ -453,7 +453,8 @@ func (a Admin) ApplyCloudSQLIAMRole(ctx context.Context, p RoleParams, insert fu
 		return err
 	}
 	if st.Base.Exists && st.Base.Marker.Claim != p.Marker.Claim {
-		return fmt.Errorf("%w: %q", ErrNotOwned, p.Base)
+		// The role is named by a principal, personal data: the error is logged.
+		return ErrNotOwned
 	}
 	var stmts []string
 	if !st.Base.Exists {
@@ -497,7 +498,7 @@ func (a Admin) DropCloudSQLIAMRole(ctx context.Context, base, claim, database st
 		// grant is best effort: a role that owns nothing needs no membership,
 		// and one that does fails in REASSIGN with the real cause.
 		if err := s.Exec(ctx, "GRANT "+ident+" TO CURRENT_USER"); err != nil {
-			log.FromContext(ctx).Info("the admin role could not be made a member of the role being dropped", "role", base)
+			log.FromContext(ctx).Info("the admin role could not be made a member of the Cloud SQL IAM role being dropped")
 		}
 		return nil
 	})

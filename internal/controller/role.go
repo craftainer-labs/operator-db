@@ -311,8 +311,13 @@ func (e *roleExternal) observe(ctx context.Context, iam bool) (lifecycle.Observa
 			continue
 		}
 		if r.info.Marker.Claim != e.id {
+			label := r.name
+			if iam && e.be.provider == cloud.ProviderGCP {
+				// Named by the principal, personal data that errors carry to the log.
+				label = e.claim.Name
+			}
 			if err := e.foreign(fmt.Errorf("%w: role %q belongs to another claim or is not managed by this operator",
-				lifecycle.ErrNameCollision, r.name)); err != nil {
+				lifecycle.ErrNameCollision, label)); err != nil {
 				return none, err
 			}
 			continue
@@ -583,7 +588,7 @@ func (e *roleExternal) deleteCloudSQLUser(ctx context.Context) error {
 		return deleteIAMUser(ctx, api, e.be.cs, e.base)
 	})
 	if skipped {
-		log.FromContext(ctx).Info("the role is not this claim's and was left alone", "roles", []string{e.base})
+		log.FromContext(ctx).Info("the Cloud SQL IAM role is not this claim's and was left alone")
 	}
 	return err
 }
