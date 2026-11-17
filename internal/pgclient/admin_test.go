@@ -568,12 +568,12 @@ func TestApplyIAMRole(t *testing.T) {
 	q := `"team-a_a""pp_x"`
 	f.want(t,
 		`|CREATE ROLE `+q+` LOGIN; COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1'`,
-		`|ALTER ROLE `+q+` WITH LOGIN CONNECTION LIMIT 7`,
+		`|ALTER ROLE `+q+` WITH LOGIN PASSWORD NULL CONNECTION LIMIT 7`,
 		`|GRANT "rds_iam" TO `+q,
 		`|GRANT CONNECT ON DATABASE "team-a_db_y" TO `+q,
 		`team-a_db_y|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO `+q,
 		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite'`)
-	f.wantNot(t, "PASSWORD", "NOLOGIN", "SET role")
+	f.wantNot(t, "PASSWORD '", "NOLOGIN", "SET role")
 	if last := f.stmts[len(f.stmts)-1]; !strings.HasPrefix(last, `|COMMENT ON ROLE `) {
 		t.Errorf("the marker is not written last: %v", f.stmts)
 	}

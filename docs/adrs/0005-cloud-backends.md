@@ -86,7 +86,11 @@ no `discovered` field, and its probe reports only conditions it chooses.
   table and sequence grants and default privileges of `ReadOnly`, `ReadWrite`
   or `Owner`, as in password mode) and the claim's connection limit. Every
   identifier is quoted with `pgx.Identifier` and every literal with `Literal`.
-  `rds_iam` is RDS's own role; the operator grants it and never creates it.
+  `rds_iam` is RDS's own role; the operator grants it and never creates it. A
+  stored password is cleared (`PASSWORD NULL`). Unlike password mode, which
+  logs in as a member of a NOLOGIN owner role (`SET role`), the privileges are
+  the login's own, as ADR 0002 section 16.4 specifies, so objects an IAM login
+  creates are owned by that login.
 - **Ownership.** The role is created with the claim marker in one query
   (`COMMENT ON ROLE`, ADR 0002 section 10), and the full marker (with the
   privileges) is written after the grants. The marker is checked before any

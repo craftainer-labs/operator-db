@@ -82,6 +82,8 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 // must be usable (derr) and the ARN of the login must be known. It records the
 // ARN on x.
 func (r *RoleReconciler) checkIAM(role *dbv1alpha1.DatabaseRole, x *roleExternal, derr error) error {
+	// cloud is set for any provider, and CEL admits only AWS until NKdb-2 and
+	// NKdb-3, which must narrow this to AWS when they add theirs.
 	if !x.be.cloud {
 		r.warn(role, ReasonAuthModeUnsupported, ErrAuthModeUnsupported.Error())
 		return ErrAuthModeUnsupported

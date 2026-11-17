@@ -399,7 +399,7 @@ func (a Admin) apply(ctx context.Context, p RoleParams, stmts, grants []string) 
 }
 
 // ApplyIAMRole is ApplyRole for an IAM-mode claim on RDS (ADR 0005): one login
-// role named Base, created without a password and made a member of rds_iam, so
+// role named Base, without a password (a stored one is cleared) and a member of rds_iam, so
 // the tenant logs in with an IAM token. It gets the same privileges as the
 // owner role of ApplyRole, directly. Password is not used.
 //
@@ -425,7 +425,7 @@ func (a Admin) ApplyIAMRole(ctx context.Context, p RoleParams) error {
 		stmts = append(stmts, "CREATE ROLE "+base+" LOGIN; "+commentOn("ROLE", p.Base, Marker{Claim: p.Marker.Claim}))
 	}
 	stmts = append(stmts,
-		"ALTER ROLE "+base+" WITH LOGIN CONNECTION LIMIT "+strconv.Itoa(int(p.ConnLimit)),
+		"ALTER ROLE "+base+" WITH LOGIN PASSWORD NULL CONNECTION LIMIT "+strconv.Itoa(int(p.ConnLimit)),
 		"GRANT "+Ident(RDSIAMRole)+" TO "+base)
 	stmts = append(stmts, databaseAccess(p)...)
 	return a.apply(ctx, p, stmts, grants)

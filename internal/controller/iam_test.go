@@ -73,12 +73,12 @@ func TestIAMRoleLifecycle(t *testing.T) {
 	q := `"` + base + `"`
 	h.fake.want(t,
 		`|CREATE ROLE `+q+` LOGIN; COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=`+claim+`'`,
-		`|ALTER ROLE `+q+` WITH LOGIN CONNECTION LIMIT -1`,
+		`|ALTER ROLE `+q+` WITH LOGIN PASSWORD NULL CONNECTION LIMIT -1`,
 		`|GRANT "rds_iam" TO `+q,
 		`|GRANT CONNECT ON DATABASE "`+dbName+`" TO `+q,
 		dbName+`|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO `+q,
 		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=`+claim+` privileges=ReadWrite'`)
-	h.fake.wantNot(t, `"`+base+`_a"`, `"`+base+`_b"`, "PASSWORD", "NOLOGIN", "SET role")
+	h.fake.wantNot(t, `"`+base+`_a"`, `"`+base+`_b"`, "PASSWORD '", "NOLOGIN", "SET role")
 
 	data := bindingSecret(h, role)
 	arn := "arn:aws:rds-db:eu-west-1:" + iamAccount + ":dbuser:" + iamResource + "/" + base
