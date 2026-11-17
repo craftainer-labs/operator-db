@@ -11,7 +11,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/postgresql/armpostgresqlflexibleservers/v6 v6.0.0
 	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/service/rds v1.133.0
-	github.com/craftainer-labs/lib-operator-go v0.5.0
+	github.com/craftainer-labs/lib-operator-go v0.6.0
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/jackc/puddle/v2 v2.2.3
 	github.com/onsi/ginkgo/v2 v2.27.4
