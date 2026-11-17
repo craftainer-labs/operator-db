@@ -1,13 +1,11 @@
 package v1alpha1
 
 import (
-	"net"
-	"strconv"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 )
 
 // Kinds of the group's two server tiers, the values of spec.serverRef.kind.
@@ -40,10 +38,13 @@ const (
 
 // PostgreSQL holds the fields both server kinds add to common.ServerCommon.
 type PostgreSQL struct {
-	// host is the server's host name or IP address.
+	// host is the server's host name or IP address. It is required without
+	// spec.provider; with one it overrides the discovered address (for an
+	// emulator whose API and data plane are different processes).
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	Host string `json:"host"`
+	// +optional
+	Host string `json:"host,omitempty"`
 
 	// port is the server's TCP port.
 	// +kubebuilder:validation:Minimum=1
@@ -77,20 +78,24 @@ type PostgreSQL struct {
 	AllowedExtensions []string `json:"allowedExtensions,omitempty"`
 }
 
-// endpoint returns host:port, with the default port when none is set.
-func (p *PostgreSQL) endpoint() string {
-	port := p.Port
-	if port == 0 {
-		port = DefaultPort
-	}
-	return net.JoinHostPort(p.Host, strconv.Itoa(int(port)))
-}
-
 // ClusterDatabaseServerSpec defines the desired state of ClusterDatabaseServer.
 // +kubebuilder:validation:XValidation:rule="has(self.adminCredentialsSecretRef.namespace) && size(self.adminCredentialsSecretRef.namespace) > 0",message="adminCredentialsSecretRef.namespace is required on a cluster server: name the operator's namespace"
+// +kubebuilder:validation:XValidation:rule="has(self.provider) || (has(self.host) && size(self.host) > 0)",message="host is required without provider"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type == 'AWS'",message="only provider.type AWS is supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
 type ClusterDatabaseServerSpec struct {
 	common.ServerCommon `json:",inline"`
 	PostgreSQL          `json:",inline"`
+
+	// provider says the server is a managed cloud database. It is immutable
+	// in its type: claims already point at objects in the cloud it names.
+	// +optional
+	Provider *ClusterProvider `json:"provider,omitempty"`
+
+	// credentials are the operator's credentials to the cloud API. Absent
+	// with a provider: WorkloadIdentity.
+	// +optional
+	Credentials *cloud.Credentials `json:"credentials,omitempty"`
 
 	// allowedNamespaces says which namespaces may use the server. It is
 	// required, so a cluster server without it is rejected: it fails closed.
@@ -100,9 +105,22 @@ type ClusterDatabaseServerSpec struct {
 // DatabaseServerSpec defines the desired state of DatabaseServer. A namespaced
 // server serves only claims in its own namespace and has no allowedNamespaces.
 // +kubebuilder:validation:XValidation:rule="!has(self.adminCredentialsSecretRef.namespace)",message="adminCredentialsSecretRef.namespace is forbidden on a namespaced server: the Secret is in the server's namespace"
+// +kubebuilder:validation:XValidation:rule="has(self.provider) || (has(self.host) && size(self.host) > 0)",message="host is required without provider"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type == 'AWS'",message="only provider.type AWS is supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || has(self.credentials)",message="a namespaced server with a provider must set credentials with source Secret: it cannot use WorkloadIdentity"
 type DatabaseServerSpec struct {
 	common.ServerCommon `json:",inline"`
 	PostgreSQL          `json:",inline"`
+
+	// provider says the server is a managed cloud database.
+	// +optional
+	Provider *Provider `json:"provider,omitempty"`
+
+	// credentials are the credentials to the cloud API: a Secret in the
+	// server's namespace (a namespaced server cannot use WorkloadIdentity).
+	// +optional
+	Credentials *cloud.NamespacedCredentials `json:"credentials,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -127,7 +145,7 @@ type ClusterDatabaseServer struct {
 
 	// status defines the observed state of ClusterDatabaseServer
 	// +optional
-	Status common.ServerStatus `json:"status,omitzero"`
+	Status DatabaseServerStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
@@ -161,7 +179,7 @@ type DatabaseServer struct {
 
 	// status defines the observed state of DatabaseServer
 	// +optional
-	Status common.ServerStatus `json:"status,omitzero"`
+	Status DatabaseServerStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
@@ -177,10 +195,12 @@ type DatabaseServerList struct {
 func (s *ClusterDatabaseServer) GetCommon() *common.ServerCommon { return &s.Spec.ServerCommon }
 
 // GetServerStatus returns the status the probe writes (probe.Server).
-func (s *ClusterDatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status }
+func (s *ClusterDatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status.ServerStatus }
 
 // GetEndpoint returns host:port (server.Server).
-func (s *ClusterDatabaseServer) GetEndpoint() string { return s.Spec.endpoint() }
+func (s *ClusterDatabaseServer) GetEndpoint() string {
+	return hostPort(s.Spec.PostgreSQL, s.Status.Discovered)
+}
 
 // GetAllowedNamespaces returns spec.allowedNamespaces (server.Server).
 func (s *ClusterDatabaseServer) GetAllowedNamespaces() *common.AllowedNamespaces {
@@ -191,10 +211,12 @@ func (s *ClusterDatabaseServer) GetAllowedNamespaces() *common.AllowedNamespaces
 func (s *DatabaseServer) GetCommon() *common.ServerCommon { return &s.Spec.ServerCommon }
 
 // GetServerStatus returns the status the probe writes (probe.Server).
-func (s *DatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status }
+func (s *DatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status.ServerStatus }
 
 // GetEndpoint returns host:port (server.Server).
-func (s *DatabaseServer) GetEndpoint() string { return s.Spec.endpoint() }
+func (s *DatabaseServer) GetEndpoint() string {
+	return hostPort(s.Spec.PostgreSQL, s.Status.Discovered)
+}
 
 // GetAllowedNamespaces returns nil: a namespaced server has none (server.Server).
 func (s *DatabaseServer) GetAllowedNamespaces() *common.AllowedNamespaces { return nil }

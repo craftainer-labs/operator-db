@@ -431,10 +431,10 @@ func TestServerProbesWriteTheStatusOfBothKinds(t *testing.T) {
 			return string(cond.Status) + "/" + cond.Reason, nil
 		}
 	}
-	g.Eventually(ready(cluster, &cluster.Status), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.ServerUnreachable))
+	g.Eventually(ready(cluster, &cluster.Status.ServerStatus), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.ServerUnreachable))
 	// A probe that ran is timestamped; a server that cannot be probed is not.
 	g.Expect(cluster.Status.LastProbeTime).NotTo(BeNil())
-	g.Eventually(ready(namespaced, &namespaced.Status), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.InvalidServer))
+	g.Eventually(ready(namespaced, &namespaced.Status.ServerStatus), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.InvalidServer))
 	g.Expect(namespaced.Status.LastProbeTime).To(BeNil())
 	g.Expect(stop()).To(Succeed())
 }

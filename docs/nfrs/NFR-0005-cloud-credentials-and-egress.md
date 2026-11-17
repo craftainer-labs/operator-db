@@ -1,0 +1,58 @@
+# NFR-0005. Cloud credentials stay out of output and every cloud call goes through the egress policy
+
+## Status
+
+Implemented for the AWS backend in password mode (NKdb-1a). IAM mode (NKdb-1b)
+and the GCP and Azure backends add to its verification.
+
+## Attribute
+
+Security (credential handling, server-side request forgery, multi-tenancy;
+plan Track NK, rows EB-2, EB-3, EB-5, EB-9 and EB-14).
+
+## Description
+
+- The operator's credentials to the cloud come from the SDK's default chain
+  (`WorkloadIdentity`, the default on cluster servers) or from a Secret
+  (`credentials.secretRef`). A namespaced server cannot use `WorkloadIdentity`:
+  its tenant would otherwise act as the operator's cloud identity. A cluster
+  server's Secret must be in the operator's namespace; the controller refuses
+  any other (`CredentialsNamespaceForbidden`), because CEL cannot know it.
+- Secret contents, access keys, ARNs and SDK error text never appear in a
+  condition, Event, status field or log. Cloud failures are one fixed category
+  each (`CredentialsUnavailable`, `TargetNotFound`, `EndpointOverrideForbidden`,
+  `CloudError`).
+- Every HTTP connection to a cloud API, STS included, dials through the egress
+  policy of [NFR-0003](NFR-0003-restricted-egress-and-proxy.md) (`cloud.Egress`
+  from lib-operator-go). `endpointOverride` exists only on cluster servers and
+  is honoured only with `EGRESS_MODE=allow-private`; otherwise the server is
+  `CloudResolved=False`, reason `EndpointOverrideForbidden`. It is for
+  emulators, never production. The platform's own credential sources (the EKS
+  Pod Identity agent, link-local) are the operator's environment's choice, not a
+  tenant's.
+- The operator never creates or edits its own cloud identity, trust policy or
+  grants. Its AWS permissions are `rds:DescribeDBInstances` and
+  `rds:DescribeDBClusters` (password mode).
+
+## Source
+
+Plan Track NK and its Decision log rows of 2026-11-16 and 2026-11-17 (decisions
+2, 3, 4 and 10 of the G-api);
+[ADR 0005](../adrs/0005-cloud-backends.md);
+ADR 0002 section 16 of lib-operator-go.
+
+## Verification
+
+- Unit (`internal/controller`): `TestCloudSecret` (namespace refusal, missing
+  Secret), `TestDiscover` (strict mode refuses an override, malformed Secret),
+  `TestDescribeFailuresAreCategories` (SDK text does not leak),
+  `TestCloudServerBackendAndBinding`; CEL in `api/v1alpha1`
+  (`TestProviderRules`).
+- Integration (`.github/workflows/integration.yml`, job `rds`): moto server and
+  the TLS PostgreSQL at private container addresses with `allow-private` in the
+  test wiring (`TestRDSProbeDiscoversAndConnects`,
+  `TestRDSProbeFailuresAreCategories`).
+- **Untested in CI:** that real AWS accepts the operator's credentials, the
+  WorkloadIdentity chain (IRSA, Pod Identity), AssumeRole through `roleARN`, and
+  RDS IAM token validation (NKdb-1b). moto does not enforce IAM; there is no
+  real-cloud lane.

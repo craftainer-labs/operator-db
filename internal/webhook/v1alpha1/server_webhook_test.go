@@ -35,7 +35,9 @@ func TestValidateServer(t *testing.T) {
 	for _, host := range []string{"pg", "pg.data.svc.cluster.local", "PG.Example.COM", "10.0.0.1", "::1", "2001:db8::1"} {
 		g.Expect(validateServer(host, "")).To(Succeed(), host)
 	}
-	for _, host := range []string{"", "pg_1", "-pg", "pg..x", "[::1]", "pg:5432", "pg/x", "a b"} {
+	// An empty host is the CRD's to judge: with a provider it is allowed.
+	g.Expect(validateServer("", "")).To(Succeed())
+	for _, host := range []string{"pg_1", "-pg", "pg..x", "[::1]", "pg:5432", "pg/x", "a b"} {
 		g.Expect(validateServer(host, "")).To(MatchError(ErrInvalidHost), host)
 	}
 	for _, proxy := range []string{"http://proxy:3128", "https://proxy", "socks5://127.0.0.1:1080"} {

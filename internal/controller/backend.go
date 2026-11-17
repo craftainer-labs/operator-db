@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -54,7 +55,13 @@ type Config struct {
 	OperatorNamespace     string
 	DefaultDeletionPolicy common.DeletionPolicy
 	Egress                egress.Policy
-	Connect               ConnectFunc
+	// EgressMode is the mode Egress was built from; the cloud clients use it
+	// to decide whether endpointOverride is honoured.
+	EgressMode egress.Mode
+	// RDS builds the RDS client of a cloud server (NewRDS in production). It
+	// must be set for a cloud server.
+	RDS     func(aws.Config) RDSAPI
+	Connect ConnectFunc
 	// Cache keeps the connection pool of each server between reconciles; nil
 	// opens a connection for every use.
 	Cache *ServerCache
@@ -73,6 +80,13 @@ type backend struct {
 	recorder events.EventRecorder
 	spec     dbv1alpha1.PostgreSQL
 	conn     server.Connection
+	// host and port are where the data plane is: spec.host and spec.port, or
+	// the address discovered from the cloud.
+	host string
+	port int32
+	// cloud is set for a cloud server, with the region it was discovered in.
+	cloud  bool
+	region string
 }
 
 // backend resolves ref for a claim in ns: the connection settings through
@@ -101,7 +115,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, err)
 	}
-	target, err := adminTarget(spec, conn, dial)
+	target, err := adminTarget(spec, obj.discovered, conn, dial)
 	if err != nil {
 		return nil, err
 	}
@@ -116,18 +130,23 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 			return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, err)
 		}
 	}
-	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, recorder: c.Recorder, spec: spec, conn: conn}, nil
+	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, recorder: c.Recorder, spec: spec, conn: conn,
+		host: target.Host, port: int32(target.Port), cloud: obj.cloud, region: firstNonEmpty(obj.region, obj.discovered[dbv1alpha1.DiscoveredRegion])}, nil
 }
 
 // adminTarget is the connection to a server's admin database: its host, port
 // and admin database, the admin credentials of conn, and the TLS settings.
-func adminTarget(spec dbv1alpha1.PostgreSQL, conn server.Connection, dial egress.DialFunc) (pgclient.Target, error) {
+func adminTarget(spec dbv1alpha1.PostgreSQL, discovered map[string]string, conn server.Connection, dial egress.DialFunc) (pgclient.Target, error) {
+	host, port := dbv1alpha1.Target(spec, discovered)
+	if host == "" {
+		return pgclient.Target{}, fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrNotDiscovered)
+	}
 	user, pass := conn.Admin[AdminUsernameKey], conn.Admin[AdminPasswordKey]
 	if len(user) == 0 || len(pass) == 0 {
 		return pgclient.Target{}, fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrAdminCredentials)
 	}
 	return pgclient.Target{
-		Host: spec.Host, Port: portOf(spec.Port), Database: spec.AdminDatabase, User: string(user), Password: string(pass),
+		Host: host, Port: portOf(port), Database: spec.AdminDatabase, User: string(user), Password: string(pass),
 		ServerName: conn.ServerName, CABundle: conn.CABundle, MinTLS: conn.MinTLSVersion, Dial: dial,
 	}, nil
 }
@@ -138,6 +157,11 @@ type serverObject struct {
 	uid        types.UID
 	generation int64
 	spec       dbv1alpha1.PostgreSQL
+	// discovered is status.discovered, and cloud says spec.provider is set.
+	discovered map[string]string
+	cloud      bool
+	// region is spec.provider.aws.region.
+	region string
 }
 
 // serverKey names a server in the connection cache.
@@ -191,11 +215,13 @@ func (c Config) fetchServer(ctx context.Context, ns string, ref common.ServerRef
 	if ref.Kind == dbv1alpha1.KindClusterDatabaseServer {
 		var s dbv1alpha1.ClusterDatabaseServer
 		err := c.Client.Get(ctx, client.ObjectKey{Name: ref.Name}, &s)
-		return serverObject{s.UID, s.Generation, s.Spec.PostgreSQL}, err
+		return serverObject{uid: s.UID, generation: s.Generation, spec: s.Spec.PostgreSQL, discovered: s.Status.Discovered,
+			cloud: s.Spec.Provider != nil, region: regionOf(cloudOf(&s))}, err
 	}
 	var s dbv1alpha1.DatabaseServer
 	err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &s)
-	return serverObject{s.UID, s.Generation, s.Spec.PostgreSQL}, err
+	return serverObject{uid: s.UID, generation: s.Generation, spec: s.Spec.PostgreSQL, discovered: s.Status.Discovered,
+		cloud: s.Spec.Provider != nil, region: regionOf(cloudOf(&s))}, err
 }
 
 // claimID is the claim part of the ownership marker.
@@ -209,4 +235,12 @@ func connLimit(p *int32) int32 {
 		return -1
 	}
 	return *p
+}
+
+// firstNonEmpty returns a, or b when a is empty.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

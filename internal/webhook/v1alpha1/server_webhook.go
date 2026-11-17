@@ -111,7 +111,8 @@ func (v *DatabaseServerValidator) ValidateDelete(_ context.Context, _ *dbv1alpha
 // violation, not only the first.
 func validateServer(host, proxyURL string) error {
 	var errs []error
-	if !validHost(host) {
+	// An empty host is the CRD's to judge (CEL requires it without a provider).
+	if host != "" && !validHost(host) {
 		errs = append(errs, fmt.Errorf("%w: %q", ErrInvalidHost, host))
 	}
 	if proxyURL != "" && !validProxyURL(proxyURL) {

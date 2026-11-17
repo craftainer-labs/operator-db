@@ -51,7 +51,7 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	opts := r.options(err)
 	var ext lifecycle.External[dbv1alpha1.DatabaseRoleSpec, pgclient.RoleState]
 	if err == nil {
-		opts.ServerHost = be.spec.Host
+		opts.ServerHost = be.host
 		x := newRoleExternal(be, &role)
 		x.persist = func(ctx context.Context) error { return r.Client.Status().Update(ctx, &role) }
 		// The database is the one the Database claim names in its status, not
@@ -63,6 +63,12 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 		if role.DeletionTimestamp.IsZero() {
 			x.pre = derr
+			if role.Spec.AuthMode == dbv1alpha1.AuthModeIAM {
+				x.pre = ErrAuthModeUnsupported
+				if r.Recorder != nil {
+					r.Recorder.Eventf(&role, nil, corev1.EventTypeWarning, ReasonAuthModeUnsupported, "Reconcile", "%s", ErrAuthModeUnsupported.Error())
+				}
+			}
 		}
 		ext = x
 	}
@@ -362,11 +368,11 @@ const (
 // the server's bundle; the uri carries the password, like the Secret does.
 func (e *roleExternal) data(gen, password string) binding.Data {
 	user := pgclient.LoginName(e.base, gen)
-	port := e.be.spec.Port
+	host, port := e.be.host, e.be.port
 	if port == 0 {
 		port = dbv1alpha1.DefaultPort
 	}
-	hostPort := net.JoinHostPort(e.be.spec.Host, strconv.Itoa(int(port)))
+	hostPort := net.JoinHostPort(host, strconv.Itoa(int(port)))
 	sslmode := string(e.be.spec.SSLMode)
 	if sslmode == "" {
 		sslmode = string(dbv1alpha1.SSLModeVerifyFull)
@@ -375,8 +381,8 @@ func (e *roleExternal) data(gen, password string) binding.Data {
 		Scheme: "postgresql", User: url.UserPassword(user, password), Host: hostPort,
 		Path: "/" + e.database, RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
 	}
-	return binding.Data{
-		"host":        []byte(e.be.spec.Host),
+	d := binding.Data{
+		"host":        []byte(host),
 		"port":        []byte(strconv.Itoa(int(port))),
 		"database":    []byte(e.database),
 		"username":    []byte(user),
@@ -385,6 +391,13 @@ func (e *roleExternal) data(gen, password string) binding.Data {
 		"sslrootcert": e.be.conn.CABundle,
 		"uri":         []byte(uri.String()),
 	}
+	if e.be.cloud {
+		// ADR 0002 section 16.5: the keys every cloud binding adds.
+		d["cloud"] = []byte("aws")
+		d["authMode"] = []byte(dbv1alpha1.AuthModePassword)
+		d["region"] = []byte(e.be.region)
+	}
+	return d
 }
 
 var _ lifecycle.Rotator[dbv1alpha1.DatabaseRoleSpec, pgclient.RoleState] = (*roleExternal)(nil)

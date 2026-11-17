@@ -35,6 +35,7 @@ type DatabaseRef struct {
 // the claim) and its login is written to a binding Secret.
 // +kubebuilder:validation:XValidation:rule="self.serverRef.kind in ['ClusterDatabaseServer', 'DatabaseServer']",message="serverRef.kind must be ClusterDatabaseServer or DatabaseServer"
 // +kubebuilder:validation:XValidation:rule="!has(self.rotationPolicy) || self.managementPolicies == ['*'] || 'Update' in self.managementPolicies",message="rotationPolicy needs the Update management policy"
+// +kubebuilder:validation:XValidation:rule="!has(self.authMode) || self.authMode == 'Password' || !has(self.rotationPolicy)",message="rotationPolicy is not allowed with authMode IAM"
 type DatabaseRoleSpec struct {
 	common.ClaimCommon `json:",inline"`
 	common.Credentials `json:",inline"`
@@ -46,6 +47,13 @@ type DatabaseRoleSpec struct {
 	// +kubebuilder:default=ReadWrite
 	// +optional
 	Privileges Privileges `json:"privileges,omitempty"`
+
+	// authMode is Password (the default: a generated password) or IAM (a
+	// cloud token; refused until the IAM mode is implemented). Immutable.
+	// +kubebuilder:default=Password
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="authMode is immutable"
+	// +optional
+	AuthMode AuthMode `json:"authMode,omitempty"`
 
 	// connectionLimit caps concurrent connections of the role; -1 means
 	// unlimited.

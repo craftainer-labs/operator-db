@@ -178,6 +178,7 @@ var ErrNoOperatorNamespace = errors.New("cannot determine the operator namespace
 // controllerSettings are the flags the controllers need, validated.
 type controllerSettings struct {
 	egress    egress.Policy
+	mode      egress.Mode
 	deletion  common.DeletionPolicy
 	namespace string
 	// servers is shared by both reconcilers, so a server's connections are
@@ -211,7 +212,7 @@ func (s *settings) controllerSettings() (controllerSettings, error) {
 	ctrl.Log.WithName("setup").Info("controller settings", "egressMode", string(mode),
 		"defaultDataDeletionPolicy", string(policy), "operatorNamespace", ns)
 	return controllerSettings{
-		egress: egress.NewPolicy(mode), deletion: policy, namespace: ns,
+		egress: egress.NewPolicy(mode), mode: mode, deletion: policy, namespace: ns,
 		servers: controller.NewServerCache(controller.ServerIdleTimeout),
 	}, nil
 }
@@ -320,7 +321,7 @@ func setup(mgr ctrl.Manager, webhooks bool, cs controllerSettings) error {
 	cfg := controller.Config{
 		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder(EventRecorderName),
 		ManagedBy: EventRecorderName, OperatorNamespace: cs.namespace, DefaultDeletionPolicy: cs.deletion,
-		Egress: cs.egress, Connect: pgclient.Connect, Cache: cs.servers,
+		Egress: cs.egress, EgressMode: cs.mode, RDS: controller.NewRDS, Connect: pgclient.Connect, Cache: cs.servers,
 	}
 	steps = append(steps,
 		setupStep{"Database controller", (&controller.DatabaseReconciler{Config: cfg}).SetupWithManager},
