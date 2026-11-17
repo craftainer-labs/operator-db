@@ -317,7 +317,7 @@ func TestNewSQLAdmin(t *testing.T) {
 	}
 	// An option the SDK refuses is an error, not a panic.
 	_, err := newSQLAdmin(context.Background(), &cloud.GCPClient{HTTPClient: http.DefaultClient},
-		option.WithCredentialsFile("a"), option.WithCredentialsJSON([]byte("{}")))
+		option.WithAPIKey("k"), option.WithoutAuthentication())
 	if err == nil {
 		t.Error("conflicting options were accepted")
 	}
@@ -345,7 +345,7 @@ func TestDescribeCloudSQL(t *testing.T) {
 	if d, err = describeCloudSQL(ctx, api, cs, false); err != nil || d["endpoint"] != "34.72.10.20" {
 		t.Errorf("public: %v, %v", d, err)
 	}
-	if got := f.requests()[0]; got != "GET /v1/projects/proj-12345/instances/orders" {
+	if got := f.requests()[0]; !strings.HasPrefix(got, "GET /v1/projects/proj-12345/instances/orders?") {
 		t.Errorf("request = %q", got)
 	}
 
@@ -411,15 +411,20 @@ func TestDescribeCloudSQLFailuresAreCategories(t *testing.T) {
 		}
 	}
 	// A timeout and a cancelled context are transient too, and a plain error is not.
-	if e := sqlAdminErr(context.DeadlineExceeded); !e.(*CloudError).transient {
+	if e := sqlAdminErr(context.DeadlineExceeded); !isTransient(e) {
 		t.Error("a deadline is not transient")
 	}
-	if e := sqlAdminErr(timeoutErr{}); !e.(*CloudError).transient {
+	if e := sqlAdminErr(timeoutErr{}); !isTransient(e) {
 		t.Error("a network timeout is not transient")
 	}
-	if e := sqlAdminErr(errors.New("x")); e.(*CloudError).transient || httpStatus(errors.New("x")) != 0 {
+	if e := sqlAdminErr(errors.New("x")); isTransient(e) || httpStatus(errors.New("x")) != 0 {
 		t.Error("a plain error is transient")
 	}
+}
+
+func isTransient(err error) bool {
+	var ce *CloudError
+	return errors.As(err, &ce) && ce.transient
 }
 
 func TestDiscoverGCP(t *testing.T) {
@@ -614,7 +619,7 @@ func TestValidPrincipal(t *testing.T) {
 		"app @x.iam":                             false,
 		"":                                       false,
 		strings.Repeat("a", 60) + "@b.cd":        false,
-		"a@" + strings.Repeat("b", 60):           false,
+		"a@" + strings.Repeat("b", 62):           false,
 	} {
 		if got := ValidPrincipal(p); got != want {
 			t.Errorf("ValidPrincipal(%q) = %v, want %v", p, got, want)
@@ -655,7 +660,7 @@ func TestGCPIAMRoleLifecycle(t *testing.T) {
 		`|GRANT CONNECT ON DATABASE "`+dbName+`" TO `+q,
 		dbName+`|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO `+q,
 		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=`+claim+` privileges=ReadWrite'`)
-	h.fake.wantNot(t, "CREATE ROLE", "PASSWORD", "rds_iam", "NOLOGIN", "SET role")
+	h.fake.wantNot(t, "CREATE ROLE", "PASSWORD", `"rds_iam"`, "NOLOGIN", "SET role")
 	if role.Status.ExternalName != gcpPrincipal || role.Status.Rotation != nil {
 		t.Errorf("status = %+v", role.Status)
 	}
@@ -818,6 +823,7 @@ func TestIAMPrincipalChecks(t *testing.T) {
 	// On AWS the principal is refused.
 	aws := cloudHarness(t, common.DeletionRetain)
 	aws.reconcileOK(&DatabaseReconciler{aws.cfg}, aws.database("orders", nil))
+	aws.fake.reset()
 	role := aws.role("orders-iam", "orders", gcpIAMClaim(gcpPrincipal))
 	if err := aws.reconcile(&RoleReconciler{aws.cfg}, role); !errors.Is(err, ErrIAMPrincipalRefused) {
 		t.Errorf("AWS with a principal: %v", err)

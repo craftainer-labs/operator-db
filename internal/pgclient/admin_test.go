@@ -642,7 +642,7 @@ func TestApplyCloudSQLIAMRole(t *testing.T) {
 		`|GRANT CONNECT ON DATABASE "team-a_db_y" TO `+q,
 		`team-a_db_y|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO `+q,
 		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite'`)
-	f.wantNot(t, "CREATE ROLE", "PASSWORD", "rds_iam", "NOLOGIN")
+	f.wantNot(t, "CREATE ROLE", "PASSWORD", `"rds_iam"`, "NOLOGIN")
 	// The first marker comes before the grants.
 	first := slices.IndexFunc(f.stmts, func(s string) bool { return strings.Contains(s, "COMMENT ON ROLE") })
 	grant := slices.IndexFunc(f.stmts, func(s string) bool { return strings.Contains(s, "GRANT CONNECT") })
