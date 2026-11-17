@@ -327,9 +327,9 @@ func setup(mgr ctrl.Manager, webhooks bool, cs controllerSettings) error {
 		setupStep{"Database controller", (&controller.DatabaseReconciler{Config: cfg}).SetupWithManager},
 		setupStep{"DatabaseRole controller", (&controller.RoleReconciler{Config: cfg}).SetupWithManager},
 		setupStep{"ClusterDatabaseServer probe", serverProbe(mgr, cfg, cs.namespace,
-			func() probe.Server { return &dbv1alpha1.ClusterDatabaseServer{} })},
+			func() probe.CloudServer { return &dbv1alpha1.ClusterDatabaseServer{} })},
 		setupStep{"DatabaseServer probe", serverProbe(mgr, cfg, cs.namespace,
-			func() probe.Server { return &dbv1alpha1.DatabaseServer{} })})
+			func() probe.CloudServer { return &dbv1alpha1.DatabaseServer{} })})
 	// +kubebuilder:scaffold:builder
 	return runSteps(mgr, steps)
 }
@@ -349,9 +349,9 @@ func cacheByObject() map[client.Object]cache.ByObject {
 // ServerReachable) from a PostgreSQL probe. Its Client reads Secrets and
 // ConfigMaps live (managerOptions), and its watches on them go through the
 // manager's caches, which hold only the managed-by labelled ones.
-func serverProbe(mgr ctrl.Manager, cfg controller.Config, operatorNS string, kind func() probe.Server) func(ctrl.Manager) error {
+func serverProbe(mgr ctrl.Manager, cfg controller.Config, operatorNS string, kind func() probe.CloudServer) func(ctrl.Manager) error {
 	return (&probe.Reconciler{
-		Client: mgr.GetClient(), New: kind, Prober: controller.Prober{Config: cfg},
+		Client: mgr.GetClient(), NewCloud: kind, CloudProber: controller.Prober{Config: cfg},
 		Options: probe.Options{OperatorNamespace: operatorNS},
 	}).SetupWithManager
 }

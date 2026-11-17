@@ -417,7 +417,7 @@ func TestProberDiscoversTheAzureAddress(t *testing.T) {
 	srv.Status.Discovered = nil
 	conn := probeConn()
 	conn.ServerName = ""
-	v, err := Prober{Config: cfg}.Probe(context.Background(), srv, conn)
+	v, err := probeOnce(context.Background(), Prober{Config: cfg}, srv, conn)
 	if err != nil || v == "" || len(fake.targets) != 1 {
 		t.Fatalf("probe: %q, %v, %d connections", v, err, len(fake.targets))
 	}
@@ -455,11 +455,12 @@ func TestAzurePasswordRole(t *testing.T) {
 	}
 	h.fake.want(t, "CREATE ROLE")
 
-	// IAM is not offered on Azure yet.
+	// IAM mode needs an Entra administrator, which this server (password
+	// administrator) lacks (azure_iam_test.go has its lifecycle and checks).
 	h.rec.Reset()
 	iam := h.role("orders-iam", "orders", func(r *dbv1alpha1.DatabaseRole) { r.Spec.AuthMode = dbv1alpha1.AuthModeIAM })
-	if err := h.reconcile(rr, iam); err == nil || !strings.Contains(err.Error(), ReasonAuthModeUnsupported) {
-		t.Errorf("IAM on Azure: %v", err)
+	if err := h.reconcile(rr, iam); !errors.Is(err, ErrAuthModeUnsupported) {
+		t.Errorf("IAM on Azure with a password administrator: %v", err)
 	}
 	h.rec.AssertEvent(t, "Warning", ReasonAuthModeUnsupported, "")
 }

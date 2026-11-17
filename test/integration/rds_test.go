@@ -125,7 +125,7 @@ func TestRDSProbeDiscoversAndConnects(t *testing.T) {
 	h.createInstance(t, id)
 
 	srv := h.server(id, motoEndpoint(t))
-	version, err := controller.Prober{Config: h.cfg}.Probe(ctx, srv, h.conn)
+	version, err := probeVersion(ctx, controller.Prober{Config: h.cfg}, srv, h.conn, nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestRDSProbeFailuresAreCategories(t *testing.T) {
 
 	// An instance moto does not have.
 	h := newRDSHarness(t, egress.ModeAllowPrivate)
-	_, err := controller.Prober{Config: h.cfg}.Probe(ctx, h.server("absent-instance", motoEndpoint(t)), h.conn)
+	_, err := probeVersion(ctx, controller.Prober{Config: h.cfg}, h.server("absent-instance", motoEndpoint(t)), h.conn, nil)
 	var ce *controller.CloudError
 	if !errors.As(err, &ce) || ce.Reason != controller.ReasonTargetNotFound {
 		t.Errorf("missing instance: %v", err)
@@ -156,7 +156,7 @@ func TestRDSProbeFailuresAreCategories(t *testing.T) {
 
 	// endpointOverride is refused in strict mode, before any request is made.
 	strict := newRDSHarness(t, egress.ModeStrict)
-	_, err = controller.Prober{Config: strict.cfg}.Probe(ctx, strict.server("x", motoEndpoint(t)), strict.conn)
+	_, err = probeVersion(ctx, controller.Prober{Config: strict.cfg}, strict.server("x", motoEndpoint(t)), strict.conn, nil)
 	if !errors.As(err, &ce) || ce.Reason != controller.ReasonEndpointOverrideForbidden {
 		t.Errorf("override in strict mode: %v", err)
 	}

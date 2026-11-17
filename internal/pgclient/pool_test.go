@@ -146,3 +146,58 @@ func TestClosedPoolIsARetryableUnreachableServer(t *testing.T) {
 		t.Errorf("closed pool: %v", err)
 	}
 }
+
+// A target with a Token asks for a password for every new connection, in the
+// pool and outside it, and a failed fetch fails the connection with that error.
+func TestTokenIsFetchedForEachNewConnection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ca := newTestCA(t)
+	fs := startFakeServer(t, ca)
+	tgt := target(t, fs, ca.caPEM)
+	tokens := 0
+	tgt.Password = ""
+	tgt.Token = func(context.Context) (string, error) { tokens++; return "entra-token", nil }
+
+	pool, err := NewPool(tgt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if tokens != 0 {
+		t.Fatalf("NewPool fetched %d tokens", tokens)
+	}
+	open := Opener(pool, Connect, tgt)
+	for range 2 { // the second use takes the idle connection back
+		s, err := open(ctx, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Close(ctx)
+	}
+	if tokens != 1 {
+		t.Errorf("pooled use fetched %d tokens, want 1", tokens)
+	}
+	s, err := open(ctx, "team_db") // not pooled: a new connection
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close(ctx)
+	if tokens != 2 {
+		t.Errorf("a claim database fetched %d tokens in all, want 2", tokens)
+	}
+
+	errToken := errors.New("no token")
+	tgt.Token = func(context.Context) (string, error) { return "", errToken }
+	if _, err := Connect(ctx, tgt); !errors.Is(err, errToken) {
+		t.Errorf("Connect: %v", err)
+	}
+	failing, err := NewPool(tgt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failing.Close()
+	if _, err := Opener(failing, Connect, tgt)(ctx, ""); !errors.Is(err, errToken) {
+		t.Errorf("pool: %v", err)
+	}
+}

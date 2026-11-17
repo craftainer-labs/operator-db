@@ -799,3 +799,76 @@ func TestCloudSQLIAMErrorsDoNotCarryThePrincipal(t *testing.T) {
 		t.Errorf("a refused membership grant failed the drop: %v", err)
 	}
 }
+
+// An Azure Entra role is created with pgaadauth_create_principal for a role
+// that does not exist, after the ownership check, and the marker is written
+// right after it.
+func TestApplyEntraIAMRole(t *testing.T) {
+	ctx := context.Background()
+	p := RoleParams{
+		Base: `app@contoso.example`, Database: "team-a_db_y", Marker: Marker{Claim: "team-a/app/uid-1", Privileges: ReadWrite},
+		ConnLimit: 7, Privileges: ReadWrite,
+	}
+	q := `"app@contoso.example"`
+	f := &fakePG{}
+	if err := f.admin().ApplyEntraIAMRole(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	f.want(t,
+		`|SELECT pgaadauth_create_principal('app@contoso.example', false, false)`,
+		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1'`,
+		`|ALTER ROLE `+q+` WITH CONNECTION LIMIT 7`,
+		`|GRANT CONNECT ON DATABASE "team-a_db_y" TO `+q,
+		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite'`)
+	f.wantNot(t, "CREATE ROLE", "PASSWORD", `"rds_iam"`)
+	create := slices.IndexFunc(f.stmts, func(s string) bool { return strings.Contains(s, "pgaadauth_create_principal") })
+	marker := slices.IndexFunc(f.stmts, func(s string) bool { return strings.Contains(s, "COMMENT ON ROLE") })
+	if create < 0 || marker < create {
+		t.Errorf("the marker does not follow the create: %v", f.stmts)
+	}
+
+	// A role of ours is not created again; one that is not ours is refused
+	// before the function is called, and the error does not name it.
+	ours := "craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite"
+	f = &fakePG{rows: iamRoleRows(p.Base, ours)}
+	if err := f.admin().ApplyEntraIAMRole(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	f.wantNot(t, "pgaadauth_create_principal")
+	f = &fakePG{rows: iamRoleRows(p.Base, "hand made")}
+	if err := f.admin().ApplyEntraIAMRole(ctx, p); !errors.Is(err, ErrNotOwned) {
+		t.Errorf("foreign role: %v", err)
+	}
+	f.wantNot(t, "pgaadauth_create_principal", "GRANT")
+	f = &fakePG{failOn: "pgaadauth_create_principal"}
+	err := f.admin().ApplyEntraIAMRole(ctx, p)
+	if !errors.Is(err, errBoom) || strings.Contains(err.Error(), p.Base) {
+		t.Errorf("create failure: %v", err)
+	}
+	f.wantNot(t, "COMMENT ON", "GRANT")
+}
+
+// Dropping an Entra role is the Cloud SQL hand-over with DROP ROLE in place of
+// the Admin API call, and only for a role that is the claim's.
+func TestDropEntraIAMRole(t *testing.T) {
+	ctx := context.Background()
+	const claim = "team-a/app/uid-1"
+	base := "app@contoso.example"
+	q := `"` + base + `"`
+	f := &fakePG{rows: iamRoleRows(base, markerPrefix+claim)}
+	skipped, err := f.admin().DropEntraIAMRole(ctx, base, claim, "db")
+	if err != nil || skipped {
+		t.Fatalf("drop: %v, skipped %v", err, skipped)
+	}
+	f.want(t, `db|REASSIGN OWNED BY `+q+` TO CURRENT_USER`, `db|DROP OWNED BY `+q, `|DROP ROLE IF EXISTS `+q)
+	f = &fakePG{rows: iamRoleRows(base, "hand made")}
+	skipped, err = f.admin().DropEntraIAMRole(ctx, base, claim, "db")
+	if err != nil || !skipped {
+		t.Errorf("foreign role: %v, skipped %v", err, skipped)
+	}
+	f.wantNot(t, "DROP ROLE", "REASSIGN")
+	f = &fakePG{rows: iamRoleRows(base, markerPrefix+claim), failOn: "DROP ROLE"}
+	if _, err = f.admin().DropEntraIAMRole(ctx, base, claim, "db"); !errors.Is(err, errBoom) || strings.Contains(err.Error(), base) {
+		t.Errorf("drop failure: %v", err)
+	}
+}

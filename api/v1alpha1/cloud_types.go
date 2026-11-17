@@ -4,12 +4,14 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 )
 
-// Keys of status.discovered: what the probe read from the cloud (ADR 0002,
-// section 16.1).
+// Keys of status.discovered (common.ServerStatus.Discovered): what the probe
+// read from the cloud (ADR 0002, section 16.1): endpoint, port, resourceId,
+// accountId and region on AWS; endpoint, port, region, instanceConnectionName
+// and dnsName on Cloud SQL; endpoint, port, resourceId and region on an Azure
+// flexible server.
 const (
 	// DiscoveredEndpoint is the data-plane host name.
 	DiscoveredEndpoint = "endpoint"
@@ -114,6 +116,14 @@ type AzureDatabase struct {
 type ClusterAzureDatabase struct {
 	cloud.AzureClusterBlock `json:",inline"`
 	AzureTarget             `json:",inline"`
+
+	// entraAdmin is the Entra principal name of the identity behind
+	// credentials, which logs in to the server as its Entra administrator. It
+	// is required with adminAuthMode IAM and forbidden otherwise.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	EntraAdmin string `json:"entraAdmin,omitempty"`
 }
 
 // Provider says the server is a managed cloud database. Absent: self-hosted.
@@ -150,22 +160,6 @@ type ClusterProvider struct {
 	// azure holds the Azure settings (a PostgreSQL flexible server).
 	// +optional
 	Azure *ClusterAzureDatabase `json:"azure,omitempty"`
-}
-
-// DatabaseServerStatus is the status of both server kinds: the common one and
-// what the probe read from the cloud.
-type DatabaseServerStatus struct {
-	common.ServerStatus `json:",inline"`
-
-	// discovered is what the probe read from the cloud: endpoint, port,
-	// resourceId, accountId and region on AWS; endpoint, port, region,
-	// instanceConnectionName and dnsName on Cloud SQL; endpoint, port, resourceId
-	// and region on an Azure flexible server.
-	//
-	// +kubebuilder:validation:MaxProperties=10
-	// +kubebuilder:validation:XValidation:rule="self.all(k, size(self[k]) <= 512)",message="values are at most 512 characters"
-	// +optional
-	Discovered map[string]string `json:"discovered,omitempty"`
 }
 
 // AuthMode is how a DatabaseRole's login is authenticated.

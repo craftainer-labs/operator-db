@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/probe"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
@@ -18,12 +19,12 @@ import (
 // The kinds satisfy the interfaces lib-operator-go's reconciler and server
 // resolver are written against.
 var (
-	_ lifecycle.Claim = (*Database)(nil)
-	_ lifecycle.Claim = (*DatabaseRole)(nil)
-	_ server.Server   = (*ClusterDatabaseServer)(nil)
-	_ server.Server   = (*DatabaseServer)(nil)
-	_ probe.Server    = (*ClusterDatabaseServer)(nil)
-	_ probe.Server    = (*DatabaseServer)(nil)
+	_ lifecycle.Claim    = (*Database)(nil)
+	_ lifecycle.Claim    = (*DatabaseRole)(nil)
+	_ server.CloudServer = (*ClusterDatabaseServer)(nil)
+	_ server.CloudServer = (*DatabaseServer)(nil)
+	_ probe.CloudServer  = (*ClusterDatabaseServer)(nil)
+	_ probe.CloudServer  = (*DatabaseServer)(nil)
 )
 
 func TestAddToScheme(t *testing.T) {
@@ -46,7 +47,7 @@ func TestServerAccessors(t *testing.T) {
 	cluster.Spec.Host = "pg.example.svc"
 	cluster.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
 	cluster.Spec.ProxyURL = "http://proxy:3128"
-	g.Expect(cluster.GetCommon().ProxyURL).To(Equal("http://proxy:3128"))
+	g.Expect(cluster.GetCloudCommon().ProxyURL).To(Equal("http://proxy:3128"))
 	g.Expect(cluster.GetAllowedNamespaces().From).To(Equal(common.NamespacesAll))
 	// An unset port is the default; a set one is used.
 	g.Expect(cluster.GetEndpoint()).To(Equal("pg.example.svc:5432"))
@@ -57,7 +58,7 @@ func TestServerAccessors(t *testing.T) {
 	namespaced.Spec.Host = "::1"
 	namespaced.Spec.Port = 5433
 	namespaced.Spec.ProxyURL = "socks5://p:1080"
-	g.Expect(namespaced.GetCommon().ProxyURL).To(Equal("socks5://p:1080"))
+	g.Expect(namespaced.GetCloudCommon().ProxyURL).To(Equal("socks5://p:1080"))
 	g.Expect(namespaced.GetAllowedNamespaces()).To(BeNil())
 	g.Expect(namespaced.GetEndpoint()).To(Equal("[::1]:5433"))
 
@@ -145,4 +146,23 @@ func TestDatabaseRoleAccessors(t *testing.T) {
 	g.Expect(r.Status.ObservedGeneration).To(Equal(int64(2)))
 	g.Expect(r.Status.LastReconcileTime.Equal(&now)).To(BeTrue())
 	g.Expect(r.Status.LateInitialized).To(Equal(map[string]string{"k": "v"}))
+}
+
+// A namespaced server's cloud credentials Secret is in its own namespace, and
+// only a Secret source names one.
+func TestDatabaseServerCredentialsSecret(t *testing.T) {
+	g := NewWithT(t)
+	s := &DatabaseServer{ObjectMeta: metav1.ObjectMeta{Namespace: "team"}}
+	name, ns := s.GetCredentialsSecret()
+	g.Expect(name + ns).To(BeEmpty())
+	s.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceWorkloadIdentity}
+	name, ns = s.GetCredentialsSecret()
+	g.Expect(name + ns).To(BeEmpty())
+	s.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceSecret}
+	name, ns = s.GetCredentialsSecret()
+	g.Expect(name + ns).To(BeEmpty())
+	s.Spec.Credentials.SecretRef = &cloud.SecretRef{Name: "azure"}
+	name, ns = s.GetCredentialsSecret()
+	g.Expect(name).To(Equal("azure"))
+	g.Expect(ns).To(Equal("team"))
 }

@@ -406,12 +406,12 @@ func TestServerProbesWriteTheStatusOfBothKinds(t *testing.T) {
 	admin(opsNS)
 	cluster := &dbv1alpha1.ClusterDatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: "probe-cluster"}}
 	cluster.Spec.Host = "127.0.0.1"
-	cluster.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "pg-admin", Namespace: opsNS}
+	cluster.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "pg-admin", Namespace: opsNS}
 	cluster.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
 	g.Expect(c.Create(ctx, cluster)).To(Succeed())
 	namespaced := &dbv1alpha1.DatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: "probe-team", Namespace: "team"}}
 	namespaced.Spec.Host = "127.0.0.1"
-	namespaced.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "missing"}
+	namespaced.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "missing"}
 	g.Expect(c.Create(ctx, namespaced)).To(Succeed())
 	t.Cleanup(func() { _ = c.Delete(ctx, cluster); _ = c.Delete(ctx, namespaced) })
 
@@ -431,10 +431,10 @@ func TestServerProbesWriteTheStatusOfBothKinds(t *testing.T) {
 			return string(cond.Status) + "/" + cond.Reason, nil
 		}
 	}
-	g.Eventually(ready(cluster, &cluster.Status.ServerStatus), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.ServerUnreachable))
+	g.Eventually(ready(cluster, &cluster.Status), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.ServerUnreachable))
 	// A probe that ran is timestamped; a server that cannot be probed is not.
 	g.Expect(cluster.Status.LastProbeTime).NotTo(BeNil())
-	g.Eventually(ready(namespaced, &namespaced.Status.ServerStatus), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.InvalidServer))
+	g.Eventually(ready(namespaced, &namespaced.Status), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.InvalidServer))
 	g.Expect(namespaced.Status.LastProbeTime).To(BeNil())
 	g.Expect(stop()).To(Succeed())
 }

@@ -18,7 +18,7 @@ func TestServerSpecOfBothKinds(t *testing.T) {
 	h := newHarness(t, common.DeletionRetain, nil)
 	ns := &dbv1alpha1.DatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: "local", Namespace: h.ns}}
 	ns.Spec.Host = "local.example.test"
-	ns.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "local-admin"}
+	ns.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "local-admin"}
 	h.must(env.Client.Create(context.Background(), ns))
 
 	got, err := h.cfg.fetchServer(context.Background(), h.ns, common.ServerRef{Kind: dbv1alpha1.KindDatabaseServer, Name: "local"})

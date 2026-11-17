@@ -287,7 +287,8 @@ func TestRecordAndStatusOf(t *testing.T) {
 	record(srv, cloudOf(srv), map[string]string{"endpoint": "h"}, nil)
 	st := serverStatusOf(srv)
 	c := meta.FindStatusCondition(st.Conditions, ConditionCloudResolved)
-	if st.Discovered["endpoint"] != "h" || c == nil || c.Status != metav1.ConditionTrue || c.Reason != ReasonResolved || c.ObservedGeneration != 3 {
+	// What was discovered goes to the probe's result, which writes it.
+	if st.Discovered != nil || c == nil || c.Status != metav1.ConditionTrue || c.Reason != ReasonResolved || c.ObservedGeneration != 3 {
 		t.Errorf("success: %+v %+v", st.Discovered, c)
 	}
 	record(srv, cloudOf(srv), nil, cloudErr(ReasonTargetNotFound, "the DB instance does not exist"))
@@ -337,7 +338,7 @@ func TestProberDiscoversTheCloudAddress(t *testing.T) {
 	cfg.RDS = func(aws.Config) RDSAPI { return api }
 	p := Prober{Config: cfg}
 
-	v, err := p.Probe(ctx, srv, probeConn())
+	v, err := probeOnce(ctx, p, srv, probeConn())
 	if err != nil || v == "" || len(fake.targets) != 1 || fake.targets[0].Host != "orders.abc.eu-west-1.rds.amazonaws.com" || fake.targets[0].Port != 5433 {
 		t.Fatalf("probe: %q, %v, %+v", v, err, fake.targets)
 	}
@@ -346,12 +347,12 @@ func TestProberDiscoversTheCloudAddress(t *testing.T) {
 	}
 	// An explicit host overrides the discovered address (an emulator).
 	srv.Spec.Host, srv.Spec.Port = "10.0.0.7", 6432
-	if _, err = p.Probe(ctx, srv, probeConn()); err != nil || fake.targets[1].Host != "10.0.0.7" || fake.targets[1].Port != 6432 {
+	if _, err = probeOnce(ctx, p, srv, probeConn()); err != nil || fake.targets[1].Host != "10.0.0.7" || fake.targets[1].Port != 6432 {
 		t.Errorf("override: %v, %+v", err, fake.targets)
 	}
 	// A target that is gone fails the probe with a category and no connection.
 	api.inst, api.err = nil, &rdstypes.DBInstanceNotFoundFault{}
-	if _, err = p.Probe(ctx, srv, probeConn()); reasonOf(t, err) != ReasonTargetNotFound || len(fake.targets) != 2 {
+	if _, err = probeOnce(ctx, p, srv, probeConn()); reasonOf(t, err) != ReasonTargetNotFound || len(fake.targets) != 2 {
 		t.Errorf("gone: %v, %d connections", err, len(fake.targets))
 	}
 }
@@ -367,6 +368,9 @@ func TestCloudServerBackendAndBinding(t *testing.T) {
 			SecretRef: &cloud.SecretRef{Name: "aws", Namespace: s.Spec.AdminCredentialsSecretRef.Namespace}}
 	})
 	ctx := context.Background()
+	// ResolveCloud reads the credentials Secret of a cloud server.
+	h.must(env.Client.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "aws", Namespace: h.ops},
+		Data: map[string][]byte{cloud.KeyAWSAccessKeyID: []byte("id"), cloud.KeyAWSSecretAccessKey: []byte("key")}}))
 	if _, err := h.cfg.backend(ctx, h.ns, h.ref()); !errors.Is(err, ErrNotDiscovered) || !errors.Is(err, server.ErrInvalidServer) {
 		t.Fatalf("undiscovered: %v", err)
 	}

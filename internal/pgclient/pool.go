@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,6 +36,18 @@ func NewPool(t Target) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 	pc.MaxConns, pc.MaxConnIdleTime, pc.HealthCheckPeriod = poolMaxConns, poolMaxConnIdleTime, poolHealthCheck
+	if t.Token != nil {
+		// The password is a token that expires: fetched for each new physical
+		// connection, so a connection the pool opens an hour later still logs in.
+		pc.BeforeConnect = func(ctx context.Context, cc *pgx.ConnConfig) error {
+			pw, err := t.Token(ctx)
+			if err != nil {
+				return err
+			}
+			cc.Password = pw
+			return nil
+		}
+	}
 	return pgxpool.NewWithConfig(context.Background(), pc)
 }
 

@@ -511,7 +511,7 @@ func TestProberDiscoversTheCloudSQLAddress(t *testing.T) {
 	srv.Status.Discovered = nil
 	conn := probeConn()
 	conn.ServerName = ""
-	v, err := Prober{Config: cfg}.Probe(context.Background(), srv, conn)
+	v, err := probeOnce(context.Background(), Prober{Config: cfg}, srv, conn)
 	if err != nil || v == "" || len(fake.targets) != 1 {
 		t.Fatalf("probe: %q, %v, %d connections", v, err, len(fake.targets))
 	}
@@ -539,7 +539,7 @@ func TestAdminTargetServerName(t *testing.T) {
 	} {
 		c := conn
 		c.ServerName = tc.serverName
-		tg, err := adminTarget(dbv1alpha1.PostgreSQL{Host: tc.host}, disc, c, dial)
+		tg, err := adminTarget(dbv1alpha1.PostgreSQL{Host: tc.host}, disc, c, dial, nil)
 		if err != nil || tg.ServerName != tc.want {
 			t.Errorf("%s: %q, %v", name, tg.ServerName, err)
 		}

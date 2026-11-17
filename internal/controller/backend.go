@@ -11,8 +11,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -115,18 +117,21 @@ func (b *backend) sqlAdmin(ctx context.Context) (api SQLAdminAPI, done func(), e
 }
 
 // backend resolves ref for a claim in ns: the connection settings through
-// server.Resolve (which enforces allowedNamespaces), the server's PostgreSQL
-// fields, and the admin Admin whose connections dial through the egress policy
-// and the server's proxy.
+// server.ResolveCloud (which enforces allowedNamespaces and reads the admin
+// Secret, if the server names one, and the cloud credentials), the server's
+// PostgreSQL fields, and the admin Admin whose connections dial through the
+// egress policy and the server's proxy. With adminAuthMode IAM the login is the
+// Entra administrator's, with a token for each new connection.
 func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*backend, error) {
 	cacheKey := serverKey(ns, ref)
-	conn, err := server.Resolve(ctx, c.Client, ns, ref, server.WithOperatorNamespace(c.OperatorNamespace))
+	cc, err := server.ResolveCloud(ctx, c.Client, ns, ref, server.WithOperatorNamespace(c.OperatorNamespace))
+	conn := cc.Connection
 	if err != nil {
 		// A server that is gone or no longer usable keeps no connections. A
 		// namespace the server does not serve says nothing about the server
 		// (other namespaces share the entry), so it is not on this list.
 		if errors.Is(err, server.ErrServerNotFound) || errors.Is(err, server.ErrInvalidServer) ||
-			errors.Is(err, server.ErrAdminSecretNamespaceForbidden) {
+			errors.Is(err, server.ErrAdminSecretNamespaceForbidden) || errors.Is(err, server.ErrCredentialsSecretNamespaceForbidden) {
 			c.Cache.Forget(cacheKey)
 		}
 		return nil, err
@@ -140,7 +145,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", server.ErrInvalidServer, err)
 	}
-	target, err := adminTarget(spec, obj.discovered, conn, dial)
+	target, err := adminTarget(spec, obj.discovered, conn, dial, c.entraLogin(obj.cs, cc))
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +153,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	// (and closed) on its own.
 	var pool *pgxpool.Pool
 	if c.Cache != nil {
-		pool, err = c.Cache.Get(cacheKey, stamp(obj, target, conn.Proxy), func() (*pgxpool.Pool, error) {
+		pool, err = c.Cache.Get(cacheKey, stamp(obj, target, conn.Proxy, cc.Credentials), func() (*pgxpool.Pool, error) {
 			return pgclient.NewPool(target)
 		})
 		if err != nil {
@@ -175,14 +180,18 @@ func IAMResourceARN(region string, discovered map[string]string, user string) (s
 }
 
 // adminTarget is the connection to a server's admin database: its host, port
-// and admin database, the admin credentials of conn, and the TLS settings.
-func adminTarget(spec dbv1alpha1.PostgreSQL, discovered map[string]string, conn server.Connection, dial egress.DialFunc) (pgclient.Target, error) {
+// and admin database, the admin credentials of conn (or, with entra set, the
+// Entra administrator and its token), and the TLS settings.
+func adminTarget(spec dbv1alpha1.PostgreSQL, discovered map[string]string, conn server.Connection, dial egress.DialFunc, entra *entraLogin) (pgclient.Target, error) {
 	host, port := dbv1alpha1.Target(spec, discovered)
 	if host == "" {
 		return pgclient.Target{}, fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrNotDiscovered)
 	}
-	user, pass := conn.Admin[AdminUsernameKey], conn.Admin[AdminPasswordKey]
-	if len(user) == 0 || len(pass) == 0 {
+	user, pass := string(conn.Admin[AdminUsernameKey]), string(conn.Admin[AdminPasswordKey])
+	var token func(context.Context) (string, error)
+	if entra != nil {
+		user, pass, token = entra.user, "", entra.token
+	} else if user == "" || pass == "" {
 		return pgclient.Target{}, fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrAdminCredentials)
 	}
 	// A Cloud SQL instance is reached by IP address, which its certificate does
@@ -194,7 +203,7 @@ func adminTarget(spec dbv1alpha1.PostgreSQL, discovered map[string]string, conn 
 		name = discovered[dbv1alpha1.DiscoveredDNSName]
 	}
 	return pgclient.Target{
-		Host: host, Port: portOf(port), Database: spec.AdminDatabase, User: string(user), Password: string(pass),
+		Host: host, Port: portOf(port), Database: spec.AdminDatabase, User: user, Password: pass, Token: token,
 		ServerName: name, CABundle: conn.CABundle, MinTLS: conn.MinTLSVersion, Dial: dial,
 	}, nil
 }
@@ -225,14 +234,24 @@ func serverKey(ns string, ref common.ServerRef) string {
 // stamp identifies what a cached pool was built from: the server object (UID
 // and generation) and everything the connection takes from outside it, which
 // the generation does not cover: the credentials, the CA bundle and the proxy.
-// The credentials only go into a hash.
-func stamp(o serverObject, t pgclient.Target, proxy *url.URL) string {
+// The credentials only go into a hash: the admin password, and the cloud
+// credentials (secret), which an Entra administrator's token is fetched with.
+// An Entra login is told from a password one by the token.
+func stamp(o serverObject, t pgclient.Target, proxy *url.URL, secret map[string][]byte) string {
 	h := sha256.New()
-	for _, part := range [][]byte{
+	login := "password"
+	if t.Token != nil {
+		login = "entra"
+	}
+	parts := [][]byte{
 		[]byte(o.uid), []byte(strconv.FormatInt(o.generation, 10)), []byte(t.Host), []byte(strconv.Itoa(int(t.Port))),
 		[]byte(t.Database), []byte(t.User), []byte(t.Password), []byte(t.ServerName), t.CABundle,
-		[]byte(strconv.FormatUint(uint64(t.MinTLS), 10)), []byte(proxyText(proxy)),
-	} {
+		[]byte(strconv.FormatUint(uint64(t.MinTLS), 10)), []byte(proxyText(proxy)), []byte(login),
+	}
+	for _, k := range slices.Sorted(maps.Keys(secret)) {
+		parts = append(parts, []byte(k), secret[k])
+	}
+	for _, part := range parts {
 		// Length-prefixed, so ("ab","c") and ("a","bc") differ.
 		_, _ = h.Write(strconv.AppendInt(nil, int64(len(part)), 10))
 		_, _ = h.Write([]byte{0})

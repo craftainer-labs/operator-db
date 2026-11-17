@@ -197,8 +197,8 @@ password the operator runs SQL with. Claims use `authMode: Password`
 login, granted `rds_iam`, with no password and no rotation, and the binding
 Secret carries `iamResourceArn`, the `rds-db:connect` ARN the workload's role
 must be allowed, so the workload builds a 15-minute token for `username` with
-the AWS SDK. `IAM` on a server that is not on AWS is refused with
-`AuthModeUnsupported`. The operator needs `rds:DescribeDBInstances` and
+the AWS SDK. `IAM` on a self-hosted server is refused with
+`AuthModeUnsupported` (it is offered on AWS, Cloud SQL and Azure). The operator needs `rds:DescribeDBInstances` and
 `rds:DescribeDBClusters`. `endpointOverride` (cluster servers only, and only
 with `EGRESS_MODE=allow-private`) is for emulators.
 
@@ -238,8 +238,21 @@ as the administrator of `adminCredentialsSecretRef` over verified TLS, so set
 `tls.caBundle` when the system roots do not cover the server's certificate. The
 operator needs read access to the server
 (`Microsoft.DBforPostgreSQL/flexibleServers/read`). Password claims work as on any
-server; `authMode: IAM` and an Entra administrator login are not available on
-Azure yet and are refused with `AuthModeUnsupported`.
+server.
+
+On a `ClusterDatabaseServer` for Azure the operator can log in without a
+password: set `adminAuthMode: IAM` and `provider.azure.entraAdmin` to the Entra
+principal name of the identity behind `credentials` (which must be the server's
+Microsoft Entra administrator), and leave `adminCredentialsSecretRef` out. The
+operator fetches an Entra token for
+`https://ossrdbms-aad.database.windows.net/.default` for each new connection and
+uses it as the password. A `DatabaseRole` with `authMode: IAM` on an Azure
+server needs `iam.principal`, the Entra principal name (at most 63 bytes): the
+operator creates its role with `pgaadauth_create_principal`, with the claim's
+ownership marker, and the binding names the principal as `username` with no
+password; the workload logs in with its own Entra token for the same scope. Only
+cluster servers have `adminAuthMode`, and `IAM` is Azure only. A claim on a cloud
+server also needs its credentials Secret to exist, when the server names one.
 
 ## Binding Secret
 
@@ -264,7 +277,7 @@ On a cloud server the Secret adds `cloud` (`aws`, `gcp` or `azure`) and `authMod
 (`Password` or `IAM`), and `region` on AWS or `instanceConnectionName`
 (`project:location:instance`) on Cloud SQL. In `IAM` mode it has **no `password`
 and no `uri`**, its `username` is the one login role (it never changes; on Cloud
-SQL it is `iam.principal`), and on AWS it adds `iamResourceArn`
+SQL and Azure it is `iam.principal`), and on AWS it adds `iamResourceArn`
 (`arn:aws:rds-db:<region>:<account>:dbuser:<resourceId>/<username>`).
 
 ## Install

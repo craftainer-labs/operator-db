@@ -17,7 +17,7 @@ func clusterServer(host, proxy string) *dbv1alpha1.ClusterDatabaseServer {
 	s := &dbv1alpha1.ClusterDatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: "pg"}}
 	s.Spec.Host = host
 	s.Spec.ProxyURL = proxy
-	s.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "pg-admin", Namespace: "operator-db-system"}
+	s.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "pg-admin", Namespace: "operator-db-system"}
 	s.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
 	return s
 }
@@ -26,7 +26,7 @@ func namespacedServer(host, proxy string) *dbv1alpha1.DatabaseServer {
 	s := &dbv1alpha1.DatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: "pg", Namespace: "default"}}
 	s.Spec.Host = host
 	s.Spec.ProxyURL = proxy
-	s.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "pg-admin"}
+	s.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "pg-admin"}
 	return s
 }
 

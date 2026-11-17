@@ -2,16 +2,23 @@
 
 package integration
 
-// The Azure backend in Password mode (NKdb-3a) against a fake of Azure Resource
-// Manager (servers.get) and the Entra authority, and the TLS PostgreSQL of the
-// other tests as the "Azure" data plane. Resource Manager has no emulator, so
+// The Azure backend (NKdb-3a Password mode, NKdb-3b Entra administrator and IAM
+// mode) against a fake of Azure Resource Manager (servers.get) and the Entra
+// authority, and the TLS PostgreSQL of the other tests as the "Azure" data
+// plane. Resource Manager has no emulator, so
 // the fake is a small Go test server in this process. azcore and MSAL refuse
 // plain http for authenticated requests, so it serves TLS with a certificate
 // generated here for the private address it listens on, which the operator
 // trusts through Config.CloudRootCAs. The address is private, never loopback,
 // because pkg/egress blocks loopback in both modes; EGRESS_MODE=allow-private is
 // in this test's wiring only. Nothing validates an Entra token here
-// (docs/nfrs/NFR-0005).
+// (docs/nfrs/NFR-0005): the fake hands out one fixed token, and the Entra
+// administrator is a PostgreSQL role whose password is that token, so what is
+// checked is that the token is fetched through the credential and sent as the
+// password of a real SCRAM login. pgaadauth_create_principal exists only on an
+// Azure flexible server, so a stub with the same signature stands in for it
+// and what is checked is the SQL the operator issues, and what it does with the
+// role the function creates.
 
 import (
 	"context"
@@ -190,7 +197,7 @@ func TestAzureProbeDiscoversAndConnects(t *testing.T) {
 	defer cancel()
 
 	srv := h.server("orders", h.fake.srv.URL)
-	version, err := controller.Prober{Config: h.cfg}.Probe(ctx, srv, h.conn)
+	version, err := probeVersion(ctx, controller.Prober{Config: h.cfg}, srv, h.conn, nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -214,7 +221,7 @@ func TestAzureProbeFailuresAreCategories(t *testing.T) {
 	// A server the fake does not have.
 	h := newAzureHarness(t, egress.ModeAllowPrivate)
 	h.fake.missing = true
-	_, err := controller.Prober{Config: h.cfg}.Probe(ctx, h.server("orders", h.fake.srv.URL), h.conn)
+	_, err := probeVersion(ctx, controller.Prober{Config: h.cfg}, h.server("orders", h.fake.srv.URL), h.conn, nil)
 	var ce *controller.CloudError
 	if !errors.As(err, &ce) || ce.Reason != controller.ReasonTargetNotFound {
 		t.Errorf("missing server: %v", err)
@@ -222,8 +229,137 @@ func TestAzureProbeFailuresAreCategories(t *testing.T) {
 
 	// endpointOverride is refused in strict mode, before any request is made.
 	strict := newAzureHarness(t, egress.ModeStrict)
-	_, err = controller.Prober{Config: strict.cfg}.Probe(ctx, strict.server("orders", strict.fake.srv.URL), strict.conn)
+	_, err = probeVersion(ctx, controller.Prober{Config: strict.cfg}, strict.server("orders", strict.fake.srv.URL), strict.conn, nil)
 	if !errors.As(err, &ce) || ce.Reason != controller.ReasonEndpointOverrideForbidden {
 		t.Errorf("override in strict mode: %v", err)
+	}
+}
+
+// entraRole is the PostgreSQL role of the Entra administrator the tests log in
+// as, with the fake's token as its password.
+const (
+	entraRole       = "operator@contoso.example"
+	entraLoginValue = "fake-entra-token"
+)
+
+// An Entra administrator logs in with the token the credential fetches for the
+// scope of Azure Database for PostgreSQL, through the fake authority, as the
+// password of a SCRAM login: with no admin Secret in the connection. A token
+// the server does not accept is an authentication failure.
+func TestAzureEntraAdminProbe(t *testing.T) {
+	h := newAzureHarness(t, egress.ModeAllowPrivate)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	root := adminSession(t, h.pg.admin(func(tg *pgclient.Target) { tg.ServerName = azTLSServer }), "")
+	q := pgclient.Ident(entraRole)
+	if err := root.Exec(ctx, "CREATE ROLE "+q+" LOGIN SUPERUSER PASSWORD "+pgclient.Literal(entraLoginValue)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Exec(context.Background(), "DROP ROLE IF EXISTS "+q) })
+
+	srv := h.server("orders", h.fake.srv.URL)
+	srv.Spec.AdminCredentialsSecretRef = nil
+	srv.Spec.AdminAuthMode = dbv1alpha1.AdminAuthModeIAM
+	srv.Spec.Provider.Azure.EntraAdmin = entraRole
+	conn := libserver.Connection{CABundle: h.pg.ca, ServerName: azTLSServer, MinTLSVersion: 0x0304}
+	creds := map[string][]byte{cloud.KeyAzureClientID: []byte("11111111-1111-4111-8111-111111111111"),
+		cloud.KeyAzureClientSecret: []byte("entra-client-secret")}
+
+	version, err := probeVersion(ctx, controller.Prober{Config: h.cfg}, srv, conn, creds)
+	if err != nil || !strings.Contains(version, "18") {
+		t.Fatalf("probe as the Entra administrator: %q, %v", version, err)
+	}
+	if srv.Status.Discovered[dbv1alpha1.DiscoveredEndpoint] != azFQDN {
+		t.Errorf("discovered = %v", srv.Status.Discovered)
+	}
+
+	// The server no longer accepts that token.
+	if err := root.Exec(ctx, "ALTER ROLE "+q+" PASSWORD 'another-token'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = probeVersion(ctx, controller.Prober{Config: h.cfg}, srv, conn, creds); !errors.Is(err, pgclient.ErrConnAuth) {
+		t.Errorf("a refused token: %v", err)
+	}
+}
+
+// pgaadauthStub has the signature of the function of an Azure flexible server:
+// pgaadauth_create_principal(roleName text, isAdmin boolean, isMfa boolean). It
+// creates a login role, as the real one does for an Entra principal, and
+// refuses an administrator or MFA principal: the operator creates neither.
+const pgaadauthStub = `CREATE OR REPLACE FUNCTION pgaadauth_create_principal(rolename text, isadmin boolean, ismfa boolean)
+RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  IF isadmin OR ismfa THEN RAISE EXCEPTION 'unexpected arguments'; END IF;
+  EXECUTE format('CREATE ROLE %I LOGIN', rolename);
+  RETURN 'Created role for ' || rolename;
+END $$`
+
+// An IAM-mode role on Azure: the role of an Entra principal that
+// pgaadauth_create_principal creates is marked, granted and updated; one that
+// is not the claim's is refused and left alone; dropping removes it.
+func TestAzureEntraIAMRole(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	sv := load(t)
+	admin := sv.admin(func(tg *pgclient.Target) { tg.ServerName = azTLSServer })
+	root := adminSession(t, admin, "")
+	if err := root.Exec(ctx, pgaadauthStub); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = root.Exec(context.Background(), "DROP FUNCTION IF EXISTS pgaadauth_create_principal(text, boolean, boolean)")
+	})
+	db := newDatabase(t, admin, "it/entra/db-uid")
+	const claim = "it/entra/role-uid"
+	principal := "app-" + suffix() + "@contoso.example"
+	t.Cleanup(func() { _, _ = admin.DropEntraIAMRole(context.Background(), principal, claim, db) })
+	params := func(priv string) pgclient.RoleParams {
+		return pgclient.RoleParams{
+			Base: principal, Database: db, ConnLimit: 3, Privileges: priv,
+			Marker: pgclient.Marker{Claim: claim, Privileges: priv},
+		}
+	}
+
+	if err := admin.ApplyEntraIAMRole(ctx, params(pgclient.ReadWrite)); err != nil {
+		t.Fatal(err)
+	}
+	st, err := admin.Role(ctx, principal)
+	if err != nil || !st.Base.Exists || !st.Base.Login || st.Base.ConnLimit != 3 ||
+		st.Marker != (pgclient.Marker{Claim: claim, Privileges: pgclient.ReadWrite}) || st.A.Exists || st.B.Exists {
+		t.Fatalf("after create: %+v, %v", st, err)
+	}
+	if got := one(t, root, "SELECT (rolpassword IS NULL)::text AS none FROM pg_authid WHERE rolname = "+pgclient.Literal(principal), "none"); got != "true" {
+		t.Errorf("the Entra role has a password: none = %q", got)
+	}
+	if got := one(t, root, "SELECT has_database_privilege("+pgclient.Literal(principal)+", "+pgclient.Literal(db)+", 'CONNECT')::text AS ok", "ok"); got != "true" {
+		t.Errorf("CONNECT = %q", got)
+	}
+
+	// Applied again: the role is updated, not created (the stub would fail).
+	if err := admin.ApplyEntraIAMRole(ctx, params(pgclient.ReadOnly)); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = admin.Role(ctx, principal); err != nil || st.Marker.Privileges != pgclient.ReadOnly {
+		t.Errorf("after update: %+v, %v", st, err)
+	}
+
+	// A role that is not the claim's is refused, and dropping leaves it alone.
+	other := params(pgclient.ReadOnly)
+	other.Marker.Claim = "it/entra/someone-else"
+	if err := admin.ApplyEntraIAMRole(ctx, other); !errors.Is(err, pgclient.ErrNotOwned) || strings.Contains(err.Error(), principal) {
+		t.Errorf("a role of another claim: %v", err)
+	}
+	if skipped, err := admin.DropEntraIAMRole(ctx, principal, other.Marker.Claim, db); err != nil || !skipped {
+		t.Errorf("drop of another claim's role: skipped %v, %v", skipped, err)
+	}
+	if st, err = admin.Role(ctx, principal); err != nil || !st.Base.Exists {
+		t.Fatalf("the role of another claim was dropped: %+v, %v", st, err)
+	}
+
+	if skipped, err := admin.DropEntraIAMRole(ctx, principal, claim, db); err != nil || skipped {
+		t.Fatalf("drop: skipped %v, %v", skipped, err)
+	}
+	if st, err = admin.Role(ctx, principal); err != nil || st.Base.Exists {
+		t.Errorf("after drop: %+v, %v", st, err)
 	}
 }

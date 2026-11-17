@@ -38,10 +38,10 @@ func TestProberReadsTheVersionOfBothKinds(t *testing.T) {
 	namespaced := &dbv1alpha1.DatabaseServer{}
 	namespaced.Spec.Host = "team.example.test"
 
-	for name, srv := range map[string]server.Server{"cluster": cluster, "namespaced": namespaced} {
+	for name, srv := range map[string]server.CloudServer{"cluster": cluster, "namespaced": namespaced} {
 		fake := &pgFake{answer: versionAnswer}
 		p := Prober{Config: Config{Egress: egress.NewPolicy(egress.ModeStrict), Connect: fake.connect}}
-		got, err := p.Probe(context.Background(), srv, probeConn())
+		got, err := probeOnce(context.Background(), p, srv, probeConn())
 		if err != nil || got != "18.1 (Debian 18.1-1)" {
 			t.Fatalf("%s: %q, %v", name, got, err)
 		}
@@ -56,7 +56,7 @@ func TestProberReadsTheVersionOfBothKinds(t *testing.T) {
 	}
 	cluster.Spec.Port = 0
 	fake := &pgFake{answer: versionAnswer}
-	_, _ = Prober{Config: Config{Egress: egress.NewPolicy(egress.ModeStrict), Connect: fake.connect}}.Probe(context.Background(), cluster, probeConn())
+	_, _ = probeOnce(context.Background(), Prober{Config: Config{Egress: egress.NewPolicy(egress.ModeStrict), Connect: fake.connect}}, cluster, probeConn())
 	if fake.targets[0].Port != uint16(dbv1alpha1.DefaultPort) {
 		t.Errorf("default port: %+v", fake.targets[0])
 	}
@@ -73,36 +73,36 @@ func TestProberFailuresLeakNothing(t *testing.T) {
 
 	// An unreachable server.
 	f := &pgFake{connErr: errors.New("connect to s3cret-pw failed")}
-	_, err := Prober{Config: cfg(f)}.Probe(ctx, srv, probeConn())
+	_, err := probeOnce(ctx, Prober{Config: cfg(f)}, srv, probeConn())
 	if !errors.Is(err, pgclient.ErrConnFailed) || strings.Contains(err.Error(), "s3cret-pw") {
 		t.Errorf("unreachable: %v", err)
 	}
 
 	// A failed query.
 	f = &pgFake{queryFailOn: "server_version", queryErr: errStatement}
-	if _, err = (Prober{Config: cfg(f)}).Probe(ctx, srv, probeConn()); !errors.Is(err, errStatement) {
+	if _, err = probeOnce(ctx, Prober{Config: cfg(f)}, srv, probeConn()); !errors.Is(err, errStatement) {
 		t.Errorf("query: %v", err)
 	}
 
 	// Missing credentials.
 	conn := probeConn()
 	delete(conn.Admin, AdminPasswordKey)
-	if _, err = (Prober{Config: cfg(&pgFake{})}).Probe(ctx, srv, conn); !errors.Is(err, ErrAdminCredentials) || !errors.Is(err, server.ErrInvalidServer) {
+	if _, err = probeOnce(ctx, Prober{Config: cfg(&pgFake{})}, srv, conn); !errors.Is(err, ErrAdminCredentials) || !errors.Is(err, server.ErrInvalidServer) {
 		t.Errorf("credentials: %v", err)
 	}
 
 	// A proxy the egress policy cannot dial through.
 	conn = probeConn()
 	conn.Proxy = &url.URL{Scheme: "ftp", Host: "proxy.example.test"}
-	if _, err = (Prober{Config: cfg(&pgFake{})}).Probe(ctx, srv, conn); !errors.Is(err, server.ErrInvalidServer) {
+	if _, err = probeOnce(ctx, Prober{Config: cfg(&pgFake{})}, srv, conn); !errors.Is(err, server.ErrInvalidServer) {
 		t.Errorf("proxy: %v", err)
 	}
 
 	// A server kind of another operator.
-	if _, err = (Prober{Config: cfg(&pgFake{})}).Probe(ctx, otherServer{}, probeConn()); !errors.Is(err, server.ErrUnknownServerKind) {
+	if _, err = probeOnce(ctx, Prober{Config: cfg(&pgFake{})}, otherServer{}, probeConn()); !errors.Is(err, server.ErrUnknownServerKind) {
 		t.Errorf("kind: %v", err)
 	}
 }
 
-// otherServer is a server.Server this operator does not own.
-type otherServer struct{ server.Server }
+// otherServer is a server.CloudServer this operator does not own.
+type otherServer struct{ server.CloudServer }

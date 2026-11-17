@@ -74,8 +74,11 @@ own unit tests.
 ## Don't
 
 - `azure_test.go` (build tags `integration azure`) — the Azure backend in
-  Password mode (NKdb-3a): a fake of Azure Resource Manager (`servers.get`) and
-  the Entra authority, run as a Go TLS test server at a private address (azcore
+  Password mode (NKdb-3a) and the Entra administrator login and IAM mode
+  (NKdb-3b): a fake of Azure Resource Manager (`servers.get`) and
+  the Entra authority (one fixed token, which is the password of a PostgreSQL role
+  standing for the Entra administrator; `pgaadauth_create_principal` is a stub
+  with the real signature, so only the SQL the operator issues is checked), run as a Go TLS test server at a private address (azcore
   and MSAL require https; the test's own certificate is trusted through
   `Config.CloudRootCAs`); the PostgreSQL above is the data plane. Run by the
   `azure` job with `-tags integration,azure` (the `PG_*` settings only). No

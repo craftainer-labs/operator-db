@@ -5,6 +5,10 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"strings"
+	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -176,4 +180,89 @@ func describeAzure(ctx context.Context, api ARMAPI, cs *cloudSpec) (map[string]s
 		d[dbv1alpha1.DiscoveredResourceID] = *srv.ID
 	}
 	return d, nil
+}
+
+// entraLogin is the Entra administrator login of a server with adminAuthMode
+// IAM: the principal's name is the PostgreSQL user, and token is the password
+// of every new connection.
+type entraLogin struct {
+	user  string
+	token func(context.Context) (string, error)
+}
+
+// entraLogin returns the login of cs when its adminAuthMode is IAM, else nil.
+// The token source is built on the first token, so a pool that is reused builds
+// none (see entraSource).
+func (c Config) entraLogin(cs *cloudSpec, cc server.CloudConnection) *entraLogin {
+	if cs == nil || !cs.adminIAM {
+		return nil
+	}
+	return &entraLogin{user: cs.entraAdmin, token: c.entraSource(cs, cc)}
+}
+
+// entraSource returns the function that fetches an Entra token for the scope of
+// Azure Database for PostgreSQL (cloud.AzurePostgresScope) with the operator's
+// cloud credentials: the same identity that reads Resource Manager, through the
+// egress policy and the server's proxy (cloud.Egress.Azure). The client is
+// built on the first call and kept by the function (so a connection pool keeps
+// it), and a token is fetched just before a connect and reused until a minute
+// before it expires (cloud.CachedSource). Idle connections to the authority are
+// closed after each fetch, because a pool outlives the reconcile that built
+// it. Errors are categories (cloud.ErrCredentialsUnavailable): the SDK's text
+// is not kept.
+func (c Config) entraSource(cs *cloudSpec, cc server.CloudConnection) func(context.Context) (string, error) {
+	var (
+		mu      sync.Mutex
+		src     *cloud.CachedSource
+		release func()
+	)
+	// build returns the token source, building it on first use. Only a build
+	// that worked is kept: a failed one (a refused override, a Secret not yet
+	// readable, a cancelled context) is tried again by the next connect.
+	build := func(ctx context.Context) (*cloud.CachedSource, func(), error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if src != nil {
+			return src, release, nil
+		}
+		e := cloud.Egress{Mode: c.EgressMode, Policy: c.Egress, Proxy: cc.Proxy, RootCAs: c.CloudRootCAs}
+		ac, err := e.Azure(ctx, cs.scope, cs.azure, cs.creds, cc.Credentials)
+		if err != nil {
+			return nil, nil, egressErr(err)
+		}
+		rel := func() {}
+		if hc, ok := ac.ClientOptions.Transport.(interface{ CloseIdleConnections() }); ok {
+			rel = hc.CloseIdleConnections
+		}
+		src, release = cloud.NewCachedSource(cloud.AzureTokenSource(ac.Credential, cloud.AzurePostgresScope), 0), rel
+		return src, release, nil
+	}
+	return func(ctx context.Context) (string, error) {
+		s, rel, err := build(ctx)
+		if err != nil {
+			return "", err
+		}
+		tok, _, err := s.Token(ctx)
+		rel()
+		if err != nil {
+			// cloud.ErrCredentialsUnavailable: its text is a category.
+			return "", err
+		}
+		return tok, nil
+	}
+}
+
+// ErrIAMPrincipalInvalidEntra means iam.principal is not usable as the name of
+// an Entra principal's PostgreSQL role.
+var ErrIAMPrincipalInvalidEntra = errors.New("IAMPrincipalRequired: iam.principal must be the name of an Entra principal " +
+	"(a user's principal name, or a service principal's or managed identity's name), at most 63 bytes, without control characters or " +
+	"surrounding spaces")
+
+// ValidEntraPrincipal says whether p can name the PostgreSQL role of an Entra
+// principal: pgaadauth_create_principal takes the principal's name, which is
+// also the role's name, so it is at most 63 bytes (NAMEDATALEN-1). Whether the
+// principal exists in the tenant is for Entra to say.
+func ValidEntraPrincipal(p string) bool {
+	return p != "" && len(p) <= 63 && utf8.ValidString(p) && p == strings.TrimSpace(p) &&
+		!strings.ContainsFunc(p, unicode.IsControl)
 }
