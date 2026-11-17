@@ -398,13 +398,13 @@ func TestCloudServerBackendAndBinding(t *testing.T) {
 
 type codedErr struct{ code string }
 
-func (e codedErr) Error() string { return "coded" }
+func (e codedErr) Error() string     { return "coded" }
 func (e codedErr) ErrorCode() string { return e.code }
 
 type timeoutErr struct{}
 
-func (timeoutErr) Error() string { return "timeout" }
-func (timeoutErr) Timeout() bool { return true }
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return true }
 
 func TestRDSErrorClassification(t *testing.T) {
