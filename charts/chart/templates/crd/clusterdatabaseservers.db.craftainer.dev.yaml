@@ -275,9 +275,40 @@ spec:
                     x-kubernetes-validations:
                     - message: set exactly one of dbInstanceIdentifier and dbClusterIdentifier
                       rule: has(self.dbInstanceIdentifier) != has(self.dbClusterIdentifier)
+                  gcp:
+                    description: gcp holds the Google Cloud settings (a Cloud SQL
+                      instance).
+                    properties:
+                      endpointOverride:
+                        description: EndpointOverride is as on AWSClusterBlock.
+                        maxLength: 2048
+                        pattern: ^https?://[^\s]+$
+                        type: string
+                      instance:
+                        description: instance is the Cloud SQL instance name.
+                        maxLength: 98
+                        minLength: 1
+                        pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      location:
+                        description: Location is the region, required where the resource
+                          is regional.
+                        maxLength: 64
+                        type: string
+                      project:
+                        description: Project is the project ID.
+                        maxLength: 30
+                        pattern: ^[a-z][a-z0-9-]{4,28}[a-z0-9]$
+                        type: string
+                    required:
+                    - instance
+                    - project
+                    type: object
+                    x-kubernetes-validations:
+                    - message: location is required for a Cloud SQL instance
+                      rule: has(self.location) && size(self.location) > 0
                   type:
-                    description: type is the cloud. Only AWS is supported in this
-                      version.
+                    description: 'type is the cloud: AWS or GCP in this version.'
                     enum:
                     - AWS
                     - GCP
@@ -292,6 +323,8 @@ spec:
                 x-kubernetes-validations:
                 - message: aws is required with type AWS and forbidden otherwise
                   rule: 'self.type == ''AWS'' ? has(self.aws) : !has(self.aws)'
+                - message: gcp is required with type GCP and forbidden otherwise
+                  rule: 'self.type == ''GCP'' ? has(self.gcp) : !has(self.gcp)'
               proxyURL:
                 description: |-
                   ProxyURL is an http, https or socks5 proxy; unset uses the process
@@ -379,8 +412,8 @@ spec:
                 > 0
             - message: host is required without provider
               rule: has(self.provider) || (has(self.host) && size(self.host) > 0)
-            - message: only provider.type AWS is supported
-              rule: '!has(self.provider) || self.provider.type == ''AWS'''
+            - message: only provider.type AWS and GCP are supported
+              rule: '!has(self.provider) || self.provider.type in [''AWS'', ''GCP'']'
             - message: credentials is allowed only with provider
               rule: '!has(self.credentials) || has(self.provider)'
           status:
@@ -452,7 +485,8 @@ spec:
                   type: string
                 description: |-
                   discovered is what the probe read from the cloud: endpoint, port,
-                  resourceId, accountId and region.
+                  resourceId, accountId and region on AWS; endpoint, port, region,
+                  instanceConnectionName and dnsName on Cloud SQL.
                 maxProperties: 10
                 type: object
                 x-kubernetes-validations:

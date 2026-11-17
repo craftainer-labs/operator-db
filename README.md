@@ -182,7 +182,7 @@ with TLS (verify-full, scram-sha-256) in the integration lane,
 devcontainer locally); the 100% coverage gate stays on the unit profile. The non-functional requirements are in
 [`docs/nfrs`](docs/nfrs).
 
-## Cloud databases (AWS RDS)
+## Cloud databases (AWS RDS and Cloud SQL)
 
 A server can stand for an Amazon RDS instance or Aurora cluster instead of a
 host: set `spec.provider` (`type: AWS`, `aws.region`, and one of
@@ -200,7 +200,30 @@ must be allowed, so the workload builds a 15-minute token for `username` with
 the AWS SDK. `IAM` on a server that is not on AWS is refused with
 `AuthModeUnsupported`. The operator needs `rds:DescribeDBInstances` and
 `rds:DescribeDBClusters`. `endpointOverride` (cluster servers only, and only
-with `EGRESS_MODE=allow-private`) is for emulators. See
+with `EGRESS_MODE=allow-private`) is for emulators.
+
+A server can stand for a Cloud SQL for PostgreSQL instance too: `spec.provider`
+with `type: GCP` and `gcp: {project, location, instance}` (all three are
+required; `endpointOverride` is for emulators). `credentials.source` is
+`WorkloadIdentity` (the default on a `ClusterDatabaseServer`) or `Secret` with a
+`credentials.json` service account key. The operator reads the instance's
+address, region and connection name with the Cloud SQL Admin API
+(`status.discovered`) and logs in as the administrator of
+`adminCredentialsSecretRef` over verified TLS: set `tls.caBundle` to the
+instance's server CA, and the certificate must name the instance's DNS name
+(the TLS server name defaults to the discovered one; set `tls.serverName` to
+override it). A private IP needs `EGRESS_MODE=allow-private`. Password claims
+work as on any server. An `authMode: IAM` claim needs `iam.principal`, the
+database user's name: a Google account's e-mail, or a service account's e-mail
+without `.gserviceaccount.com` (`name@project.iam`), in lower case and at most
+63 characters, immutable. The operator creates that user with the Admin API
+(`users.insert`, type `CLOUD_IAM_USER` or `CLOUD_IAM_SERVICE_ACCOUNT`), grants
+it what the claim says and deletes it with the claim (`users.delete`, after the
+objects it owns go to the admin role). The binding then has `username` (the
+principal) and `instanceConnectionName` and no password: the workload connects
+through the Cloud SQL connector with IAM authentication. The operator needs
+`cloudsql.instances.get`, and for IAM claims `cloudsql.users.create` and
+`cloudsql.users.delete`. See
 [ADR 0005](docs/adrs/0005-cloud-backends.md) and
 [NFR-0005](docs/nfrs/NFR-0005-cloud-credentials-and-egress.md).
 
@@ -223,9 +246,11 @@ keys:
 | `sslrootcert` | The PEM CA bundle that the server's `spec.tls.caBundle` refers to, for the client to pin. The key is present and empty when the server has no bundle. |
 | `uri` | A complete `postgresql://user:password@host:port/database?sslmode=...` URI built from the keys above. It carries the password, like the Secret does. It has no CA: pass `sslrootcert` to the client separately. |
 
-On a cloud server the Secret adds `cloud` (`aws`), `authMode` (`Password` or `IAM`)
-and `region`. In `IAM` mode it has **no `password` and no `uri`**, its `username` is
-the one login role (it never changes), and it adds `iamResourceArn`
+On a cloud server the Secret adds `cloud` (`aws` or `gcp`) and `authMode`
+(`Password` or `IAM`), and `region` on AWS or `instanceConnectionName`
+(`project:location:instance`) on Cloud SQL. In `IAM` mode it has **no `password`
+and no `uri`**, its `username` is the one login role (it never changes; on Cloud
+SQL it is `iam.principal`), and on AWS it adds `iamResourceArn`
 (`arn:aws:rds-db:<region>:<account>:dbuser:<resourceId>/<username>`).
 
 ## Install

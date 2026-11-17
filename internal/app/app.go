@@ -321,7 +321,7 @@ func setup(mgr ctrl.Manager, webhooks bool, cs controllerSettings) error {
 	cfg := controller.Config{
 		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder(EventRecorderName),
 		ManagedBy: EventRecorderName, OperatorNamespace: cs.namespace, DefaultDeletionPolicy: cs.deletion,
-		Egress: cs.egress, EgressMode: cs.mode, RDS: controller.NewRDS, Connect: pgclient.Connect, Cache: cs.servers,
+		Egress: cs.egress, EgressMode: cs.mode, RDS: controller.NewRDS, SQLAdmin: controller.NewSQLAdmin, Connect: pgclient.Connect, Cache: cs.servers,
 	}
 	steps = append(steps,
 		setupStep{"Database controller", (&controller.DatabaseReconciler{Config: cfg}).SetupWithManager},

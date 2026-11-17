@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
@@ -77,26 +78,49 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 }
 
 // checkIAM is the precondition of an IAM-mode claim, in this order: the server
-// must be a cloud one (AuthModeUnsupported otherwise, whatever else is wrong),
-// the rotate annotation is answered with RotationNotApplicable, the Database
-// must be usable (derr) and the ARN of the login must be known. It records the
-// ARN on x.
+// must be one whose provider supports IAM (AWS or GCP; AuthModeUnsupported
+// otherwise, whatever else is wrong), the rotate annotation is answered with
+// RotationNotApplicable, iam.principal must fit the provider (refused on AWS,
+// required and valid on GCP: IAMPrincipalRequired), the Database must be usable
+// (derr) and, on AWS, the ARN of the login must be known. It records the ARN on
+// x.
 func (r *RoleReconciler) checkIAM(role *dbv1alpha1.DatabaseRole, x *roleExternal, derr error) error {
-	// cloud is set for any provider, and CEL admits only AWS until NKdb-2 and
-	// NKdb-3, which must narrow this to AWS when they add theirs.
-	if !x.be.cloud {
+	if p := x.be.provider; p != cloud.ProviderAWS && p != cloud.ProviderGCP {
 		r.warn(role, ReasonAuthModeUnsupported, ErrAuthModeUnsupported.Error())
 		return ErrAuthModeUnsupported
 	}
 	if role.GetAnnotations()[lifecycle.AnnotationRotate] != "" {
 		r.warn(role, ReasonRotationNotApplicable, "an IAM login has no credential to rotate: the consumer's identity authenticates with a short-lived token")
 	}
+	if err := checkPrincipal(x.be.provider, role.Spec.IAM); err != nil {
+		r.warn(role, ReasonIAMPrincipalRequired, err.Error())
+		return err
+	}
 	if derr != nil {
 		return derr
+	}
+	if x.be.provider == cloud.ProviderGCP {
+		return nil
 	}
 	var err error
 	x.arn, err = IAMResourceARN(x.be.region, x.be.discovered, x.base)
 	return err
+}
+
+// ErrIAMPrincipalRefused means iam.principal is set on AWS, where the login is
+// named by the operator and the consumer's role is authorized by an ARN.
+var ErrIAMPrincipalRefused = errors.New("IAMPrincipalRequired: iam.principal is not used on AWS")
+
+// checkPrincipal checks iam.principal against the provider: refused on AWS,
+// required and a valid Cloud SQL user name on GCP.
+func checkPrincipal(p cloud.ProviderType, iam *dbv1alpha1.IAMSpec) error {
+	switch {
+	case p == cloud.ProviderAWS && iam != nil:
+		return ErrIAMPrincipalRefused
+	case p == cloud.ProviderGCP && (iam == nil || !ValidPrincipal(iam.Principal)):
+		return ErrIAMPrincipalInvalid
+	}
+	return nil
 }
 
 // warn records a Warning Event on a claim, when there is a recorder.
@@ -200,6 +224,13 @@ func newRoleExternal(be *backend, claim *dbv1alpha1.DatabaseRole) *roleExternal 
 	base := claim.GetExternalName()
 	if base == "" {
 		base = pgclient.RoleBase(claim.Namespace, claim.Name)
+		// On Cloud SQL the IAM user's name is the principal's, chosen by the claim
+		// (ADR 0002 section 16.4). A principal that is not valid is refused by
+		// checkIAM, and the derived name is only a placeholder then.
+		if be.provider == cloud.ProviderGCP && claim.Spec.AuthMode == dbv1alpha1.AuthModeIAM &&
+			claim.Spec.IAM != nil && ValidPrincipal(claim.Spec.IAM.Principal) {
+			base = claim.Spec.IAM.Principal
+		}
 		claim.SetExternalName(base)
 	}
 	priv := string(claim.Spec.Privileges)
@@ -254,8 +285,8 @@ func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpe
 
 // observe is Observe of both modes. An IAM-mode claim has the one login role
 // named base, and neither the _a nor the _b login: it is up to date when that
-// role can log in, is a member of rds_iam, has the wanted connection limit and
-// carries this claim's marker with its privileges.
+// role can log in, is (on RDS) a member of rds_iam, has the wanted connection
+// limit and carries this claim's marker with its privileges.
 func (e *roleExternal) observe(ctx context.Context, iam bool) (lifecycle.Observation[pgclient.RoleState], error) {
 	none := lifecycle.Observation[pgclient.RoleState]{}
 	// Reconcile adds the finalizer with a patch that replaces the claim with
@@ -280,8 +311,13 @@ func (e *roleExternal) observe(ctx context.Context, iam bool) (lifecycle.Observa
 			continue
 		}
 		if r.info.Marker.Claim != e.id {
+			label := r.name
+			if iam && e.be.provider == cloud.ProviderGCP {
+				// Named by the principal, personal data that errors carry to the log.
+				label = e.claim.Name
+			}
 			if err := e.foreign(fmt.Errorf("%w: role %q belongs to another claim or is not managed by this operator",
-				lifecycle.ErrNameCollision, r.name)); err != nil {
+				lifecycle.ErrNameCollision, label)); err != nil {
 				return none, err
 			}
 			continue
@@ -302,7 +338,8 @@ func (e *roleExternal) observe(ctx context.Context, iam bool) (lifecycle.Observa
 	}
 	upToDate := st.Marker.Claim == e.id && st.Marker.Privileges == e.privileges
 	if iam {
-		upToDate = upToDate && st.Base.Login && st.Base.RDSIAM && st.Base.ConnLimit == e.limit
+		upToDate = upToDate && st.Base.Login && st.Base.ConnLimit == e.limit &&
+			(e.be.provider != cloud.ProviderAWS || st.Base.RDSIAM)
 	} else {
 		upToDate = upToDate && !st.Base.Login &&
 			st.A.Exists && st.B.Exists && st.A.ConnLimit == e.limit && st.B.ConnLimit == e.limit &&
@@ -459,11 +496,22 @@ func (e *roleExternal) data(gen, password string) binding.Data {
 	}
 	if e.be.cloud {
 		// ADR 0002 section 16.5: the keys every cloud binding adds.
-		d["cloud"] = []byte("aws")
 		d["authMode"] = []byte(dbv1alpha1.AuthModePassword)
-		d["region"] = []byte(e.be.region)
+		e.cloudKeys(d)
 	}
 	return d
+}
+
+// cloudKeys adds the keys of a cloud binding that depend on the provider: the
+// cloud, and the AWS region or the Cloud SQL connection name.
+func (e *roleExternal) cloudKeys(d binding.Data) {
+	if e.be.provider == cloud.ProviderGCP {
+		d["cloud"] = []byte("gcp")
+		d["instanceConnectionName"] = []byte(e.be.cs.connectionName())
+		return
+	}
+	d["cloud"] = []byte("aws")
+	d["region"] = []byte(e.be.region)
 }
 
 // iamRoleExternal is the lifecycle.External of an IAM-mode DatabaseRole (ADR
@@ -491,40 +539,82 @@ func (e iamRoleExternal) Update(ctx context.Context, _ dbv1alpha1.DatabaseRoleSp
 }
 
 // Delete implements lifecycle.External: the role is dropped as in Password
-// mode, when it is the claim's.
+// mode, when it is the claim's; on Cloud SQL its IAM user is deleted too.
 func (e iamRoleExternal) Delete(ctx context.Context, cur pgclient.RoleState) error {
+	if e.x.be.provider == cloud.ProviderGCP {
+		return e.x.deleteCloudSQLUser(ctx)
+	}
 	return e.x.Delete(ctx, cur)
 }
 
 // issueIAM applies the IAM-mode login role and returns the binding data.
 func (e *roleExternal) issueIAM(ctx context.Context) (binding.Data, error) {
-	err := e.be.admin.ApplyIAMRole(ctx, pgclient.RoleParams{
+	p := pgclient.RoleParams{
 		Base: e.base, Database: e.database, Marker: e.marker(""), ConnLimit: e.limit, Privileges: e.privileges,
-	})
+	}
+	var err error
+	if e.be.provider == cloud.ProviderGCP {
+		err = e.be.admin.ApplyCloudSQLIAMRole(ctx, p, e.insertCloudSQLUser)
+	} else {
+		err = e.be.admin.ApplyIAMRole(ctx, p)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return e.iamData(), nil
 }
 
+// insertCloudSQLUser creates the IAM database user of a Cloud SQL claim, named
+// by the principal, with the Admin API.
+func (e *roleExternal) insertCloudSQLUser(ctx context.Context) error {
+	api, done, err := e.be.sqlAdmin(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	return insertIAMUser(ctx, api, e.be.cs, e.base)
+}
+
+// deleteCloudSQLUser removes what is the claim's of a Cloud SQL IAM user: the
+// objects it owns go to the admin role and the Admin API deletes the user. A
+// role that is not the claim's is skipped.
+func (e *roleExternal) deleteCloudSQLUser(ctx context.Context) error {
+	skipped, err := e.be.admin.DropCloudSQLIAMRole(ctx, e.base, e.id, e.database, func(ctx context.Context) error {
+		api, done, err := e.be.sqlAdmin(ctx)
+		if err != nil {
+			return err
+		}
+		defer done()
+		return deleteIAMUser(ctx, api, e.be.cs, e.base)
+	})
+	if skipped {
+		log.FromContext(ctx).Info("the Cloud SQL IAM role is not this claim's and was left alone")
+	}
+	return err
+}
+
 // iamData is the binding of an IAM-mode login (docs/crd-drafts.md, "db x
-// cloud"): no password and no uri, which would carry one. The consumer builds
-// a token for username with the AWS SDK and needs the region and the ARN its
-// role may connect to.
+// cloud"): no password and no uri, which would carry one. On AWS the consumer
+// builds a token for username with the AWS SDK and needs the region and the ARN
+// its role may connect to; on Cloud SQL username is the principal and the
+// consumer connects through the Cloud SQL connector with IAM authentication,
+// which needs the instance connection name.
 func (e *roleExternal) iamData() binding.Data {
 	host, port, sslmode := e.endpoint()
-	return binding.Data{
-		"host":           []byte(host),
-		"port":           []byte(strconv.Itoa(int(port))),
-		"database":       []byte(e.database),
-		"username":       []byte(e.base),
-		"sslmode":        []byte(sslmode),
-		"sslrootcert":    e.be.conn.CABundle,
-		"cloud":          []byte("aws"),
-		"authMode":       []byte(dbv1alpha1.AuthModeIAM),
-		"region":         []byte(e.be.region),
-		"iamResourceArn": []byte(e.arn),
+	d := binding.Data{
+		"host":        []byte(host),
+		"port":        []byte(strconv.Itoa(int(port))),
+		"database":    []byte(e.database),
+		"username":    []byte(e.base),
+		"sslmode":     []byte(sslmode),
+		"sslrootcert": e.be.conn.CABundle,
+		"authMode":    []byte(dbv1alpha1.AuthModeIAM),
 	}
+	e.cloudKeys(d)
+	if e.be.provider == cloud.ProviderAWS {
+		d["iamResourceArn"] = []byte(e.arn)
+	}
+	return d
 }
 
 var _ lifecycle.Rotator[dbv1alpha1.DatabaseRoleSpec, pgclient.RoleState] = (*roleExternal)(nil)

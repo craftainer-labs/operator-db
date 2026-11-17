@@ -36,6 +36,7 @@ type DatabaseRef struct {
 // +kubebuilder:validation:XValidation:rule="self.serverRef.kind in ['ClusterDatabaseServer', 'DatabaseServer']",message="serverRef.kind must be ClusterDatabaseServer or DatabaseServer"
 // +kubebuilder:validation:XValidation:rule="!has(self.rotationPolicy) || self.managementPolicies == ['*'] || 'Update' in self.managementPolicies",message="rotationPolicy needs the Update management policy"
 // +kubebuilder:validation:XValidation:rule="!has(self.authMode) || self.authMode == 'Password' || !has(self.rotationPolicy)",message="rotationPolicy is not allowed with authMode IAM"
+// +kubebuilder:validation:XValidation:rule="!has(self.iam) || (has(self.authMode) && self.authMode == 'IAM')",message="iam is allowed only with authMode IAM"
 type DatabaseRoleSpec struct {
 	common.ClaimCommon `json:",inline"`
 	common.Credentials `json:",inline"`
@@ -48,12 +49,18 @@ type DatabaseRoleSpec struct {
 	// +optional
 	Privileges Privileges `json:"privileges,omitempty"`
 
-	// authMode is Password (the default: a generated password) or IAM (a
-	// cloud token; refused until the IAM mode is implemented). Immutable.
+	// authMode is Password (the default: a generated password) or IAM (the
+	// consumer's cloud identity logs in with a token; no password). IAM needs a
+	// cloud server that supports it (AWS RDS, Cloud SQL). Immutable.
 	// +kubebuilder:default=Password
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="authMode is immutable"
 	// +optional
 	AuthMode AuthMode `json:"authMode,omitempty"`
+
+	// iam names the consumer's cloud identity. It is required on Cloud SQL
+	// with authMode IAM and refused on AWS.
+	// +optional
+	IAM *IAMSpec `json:"iam,omitempty"`
 
 	// connectionLimit caps concurrent connections of the role; -1 means
 	// unlimited.
@@ -61,6 +68,17 @@ type DatabaseRoleSpec struct {
 	// +kubebuilder:default=-1
 	// +optional
 	ConnectionLimit *int32 `json:"connectionLimit,omitempty"`
+}
+
+// IAMSpec is the consumer's cloud identity in IAM mode.
+type IAMSpec struct {
+	// principal is the consumer's identity: on Cloud SQL the e-mail of a Google
+	// account, or of a service account without ".gserviceaccount.com"
+	// (name@project.iam). The database user is named by it. Immutable.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=320
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="iam.principal is immutable"
+	Principal string `json:"principal"`
 }
 
 // DatabaseRoleStatus defines the observed state of DatabaseRole. externalName

@@ -36,6 +36,15 @@ and refused without TLS.
   `iamResourceArn` built from what the probe discovers in moto. PostgreSQL is not
   RDS, so the test creates the `rds_iam` role itself; no token is validated.
 
+- `cloudsql_test.go` (build tags `integration cloudsql`) — the Cloud SQL backend
+  (NKdb-2): a fake of the Cloud SQL Admin API (sqladmin has no emulator), run as
+  a Go test server on a private address of the host, answers `instances.get` with
+  the PostgreSQL's address and `users.insert` and `users.delete` by creating and
+  dropping the role in that PostgreSQL, as Cloud SQL does for an IAM database
+  user; the PostgreSQL above is the data plane. Run by the `cloudsql` job with
+  `-tags integration,cloudsql` (the `PG_*` settings only). No Google token or IAM
+  login is validated ([NFR-0005](../../docs/nfrs/NFR-0005-cloud-credentials-and-egress.md)).
+
 ## Running
 
 In CI, `.github/workflows/integration.yml` generates the certificates, starts

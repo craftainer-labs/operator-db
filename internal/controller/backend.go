@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
@@ -60,8 +61,11 @@ type Config struct {
 	EgressMode egress.Mode
 	// RDS builds the RDS client of a cloud server (NewRDS in production). It
 	// must be set for a cloud server.
-	RDS     func(aws.Config) RDSAPI
-	Connect ConnectFunc
+	RDS func(aws.Config) RDSAPI
+	// SQLAdmin builds the Cloud SQL Admin client of a GCP server
+	// (NewSQLAdmin in production). It must be set for a GCP server.
+	SQLAdmin func(context.Context, *cloud.GCPClient) (SQLAdminAPI, error)
+	Connect  ConnectFunc
 	// Cache keeps the connection pool of each server between reconciles; nil
 	// opens a connection for every use.
 	Cache *ServerCache
@@ -89,6 +93,17 @@ type backend struct {
 	cloud      bool
 	region     string
 	discovered map[string]string
+	// provider is the cloud of the server, "" for a self-hosted one. cs, cfg
+	// and proxy are what the Cloud SQL Admin client of a GCP server is built
+	// from.
+	provider cloud.ProviderType
+	cs       *cloudSpec
+	cfg      Config
+}
+
+// sqlAdmin builds the Cloud SQL Admin client of a GCP server; done releases it.
+func (b *backend) sqlAdmin(ctx context.Context) (api SQLAdminAPI, done func(), err error) {
+	return b.cfg.gcpAPI(ctx, b.cs, b.conn)
 }
 
 // backend resolves ref for a claim in ns: the connection settings through
@@ -134,7 +149,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	}
 	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, recorder: c.Recorder, spec: spec, conn: conn,
 		host: target.Host, port: int32(target.Port), cloud: obj.cloud, region: firstNonEmpty(obj.region, obj.discovered[dbv1alpha1.DiscoveredRegion]),
-		discovered: obj.discovered}, nil
+		discovered: obj.discovered, provider: providerOf(obj.cs), cs: obj.cs, cfg: c}, nil
 }
 
 // IAMResourceARN is the iamResourceArn of an IAM-mode login named user: the ARN
@@ -162,9 +177,17 @@ func adminTarget(spec dbv1alpha1.PostgreSQL, discovered map[string]string, conn 
 	if len(user) == 0 || len(pass) == 0 {
 		return pgclient.Target{}, fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrAdminCredentials)
 	}
+	// A Cloud SQL instance is reached by IP address, which its certificate does
+	// not name: the TLS server name defaults to the instance's DNS name, which
+	// the certificate of an instance with one carries. An explicit
+	// tls.serverName wins, and so does an address set in spec.host.
+	name := conn.ServerName
+	if name == "" && spec.Host == "" {
+		name = discovered[dbv1alpha1.DiscoveredDNSName]
+	}
 	return pgclient.Target{
 		Host: host, Port: portOf(port), Database: spec.AdminDatabase, User: string(user), Password: string(pass),
-		ServerName: conn.ServerName, CABundle: conn.CABundle, MinTLS: conn.MinTLSVersion, Dial: dial,
+		ServerName: name, CABundle: conn.CABundle, MinTLS: conn.MinTLSVersion, Dial: dial,
 	}, nil
 }
 
@@ -179,6 +202,8 @@ type serverObject struct {
 	cloud      bool
 	// region is spec.provider.aws.region.
 	region string
+	// cs is the provider settings, nil for a self-hosted server.
+	cs *cloudSpec
 }
 
 // serverKey names a server in the connection cache.
@@ -232,13 +257,15 @@ func (c Config) fetchServer(ctx context.Context, ns string, ref common.ServerRef
 	if ref.Kind == dbv1alpha1.KindClusterDatabaseServer {
 		var s dbv1alpha1.ClusterDatabaseServer
 		err := c.Client.Get(ctx, client.ObjectKey{Name: ref.Name}, &s)
+		cs := cloudOf(&s)
 		return serverObject{uid: s.UID, generation: s.Generation, spec: s.Spec.PostgreSQL, discovered: s.Status.Discovered,
-			cloud: s.Spec.Provider != nil, region: regionOf(cloudOf(&s))}, err
+			cloud: cs != nil, region: regionOf(cs), cs: cs}, err
 	}
 	var s dbv1alpha1.DatabaseServer
 	err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &s)
+	cs := cloudOf(&s)
 	return serverObject{uid: s.UID, generation: s.Generation, spec: s.Spec.PostgreSQL, discovered: s.Status.Discovered,
-		cloud: s.Spec.Provider != nil, region: regionOf(cloudOf(&s))}, err
+		cloud: cs != nil, region: regionOf(cs), cs: cs}, err
 }
 
 // claimID is the claim part of the ownership marker.

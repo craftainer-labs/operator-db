@@ -431,6 +431,112 @@ func (a Admin) ApplyIAMRole(ctx context.Context, p RoleParams) error {
 	return a.apply(ctx, p, stmts, grants)
 }
 
+// redacted is an error whose text does not carry a role name. A Cloud SQL IAM
+// role is named by a principal, personal data, and PostgreSQL's messages name
+// the role ("role \"x\" does not exist"); the error is logged and reaches
+// conditions. It still unwraps to the cause, for errors.Is.
+type redacted struct {
+	err  error
+	text string
+}
+
+func (e *redacted) Error() string { return e.text }
+func (e *redacted) Unwrap() error { return e.err }
+
+// redact hides name in err's text; nil stays nil.
+func redact(err error, name string) error {
+	if err == nil {
+		return nil
+	}
+	return &redacted{err: err, text: strings.ReplaceAll(err.Error(), name, "<role>")}
+}
+
+// ApplyCloudSQLIAMRole is ApplyIAMRole for a Cloud SQL IAM user (ADR 0005). The
+// login role is not created by SQL: Cloud SQL creates it when the IAM database
+// user is inserted with the Admin API, which insert does (and returns when the
+// user exists). Base is the user's name, the principal.
+//
+// The ownership check comes first and fails closed: a role of that name that
+// exists without this claim's marker is refused (ErrNotOwned) before insert
+// runs, so a tenant can never take over a role that is not its own. The marker
+// is written right after the insert, before anything else; a crash between
+// the two leaves a role without a marker, which then reads as a collision
+// until an administrator removes it. The rest is as in ApplyIAMRole, without
+// the rds_iam membership and the password: an IAM user has none.
+func (a Admin) ApplyCloudSQLIAMRole(ctx context.Context, p RoleParams, insert func(context.Context) error) (err error) {
+	defer func() { err = redact(err, p.Base) }()
+	grants, err := privilegeStatements(p.Base, p.Privileges)
+	if err != nil {
+		return err
+	}
+	st, err := a.Role(ctx, p.Base)
+	if err != nil {
+		return err
+	}
+	if st.Base.Exists && st.Base.Marker.Claim != p.Marker.Claim {
+		// The role is named by a principal, personal data: the error is logged.
+		return ErrNotOwned
+	}
+	var stmts []string
+	if !st.Base.Exists {
+		if err := insert(ctx); err != nil {
+			return err
+		}
+		err := a.with(ctx, "", func(s Session) error {
+			return s.Exec(ctx, commentOn("ROLE", p.Base, Marker{Claim: p.Marker.Claim}))
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if !st.Base.Exists || st.Base.ConnLimit != p.ConnLimit {
+		stmts = append(stmts, "ALTER ROLE "+Ident(p.Base)+" WITH CONNECTION LIMIT "+strconv.Itoa(int(p.ConnLimit)))
+	}
+	stmts = append(stmts, databaseAccess(p)...)
+	return a.apply(ctx, p, stmts, grants)
+}
+
+// DropCloudSQLIAMRole removes the Cloud SQL IAM user of a claim: its sessions
+// are ended, the objects it owns go to the admin role, and remove deletes the
+// user with the Admin API, which drops the role. A role that is not the
+// claim's (no marker, or another claim's) is left alone and reported as
+// skipped, so the operator never drops a user it cannot show it created.
+func (a Admin) DropCloudSQLIAMRole(ctx context.Context, base, claim, database string, remove func(context.Context) error) (skipped bool, err error) {
+	defer func() { err = redact(err, base) }()
+	st, err := a.Role(ctx, base)
+	if err != nil || !st.Base.Exists {
+		return false, err
+	}
+	if st.Base.Marker.Claim != claim {
+		return true, nil
+	}
+	ident, literal := Ident(base), Literal(base)
+	err = a.with(ctx, "", func(s Session) error {
+		_, err := s.Query(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = "+literal)
+		if err != nil && !insufficientPrivilege(err) {
+			return err
+		}
+		// REASSIGN OWNED needs the admin role to be a member of the role. The
+		// grant is best effort: a role that owns nothing needs no membership,
+		// and one that does fails in REASSIGN with the real cause.
+		if err := s.Exec(ctx, "GRANT "+ident+" TO CURRENT_USER"); err != nil {
+			log.FromContext(ctx).Info("the admin role could not be made a member of the Cloud SQL IAM role being dropped",
+				"cause", redact(err, base).Error())
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	err = a.with(ctx, database, func(s Session) error {
+		return execAll(ctx, s, []string{"REASSIGN OWNED BY " + ident + " TO CURRENT_USER", "DROP OWNED BY " + ident})
+	})
+	if err != nil && !errors.Is(err, ErrNoDatabase) {
+		return false, err
+	}
+	return false, remove(ctx)
+}
+
 // privilegeStatements revoke and then grant the access of a privilege level on
 // the public schema of the database the session is connected to. Default
 // privileges cover the objects the admin role creates later; objects an Owner

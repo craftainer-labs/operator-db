@@ -3,8 +3,8 @@
 ## Status
 
 Proposed. The AWS section is implemented by NKdb-1a (password mode) and
-NKdb-1b (IAM mode); GCP (NKdb-2) and Azure (NKdb-3) follow and are added to this
-record as they merge. It becomes Accepted when the last of them merges.
+NKdb-1b (IAM mode), the GCP section by NKdb-2; Azure (NKdb-3) follows and is
+added to this record as it merges. It becomes Accepted when the last of them merges.
 
 ## Context
 
@@ -28,7 +28,8 @@ no `discovered` field, and its probe reports only conditions it chooses.
   server spec: `host` is required only without a provider (with one it
   overrides the discovered address, for an emulator); `credentials` only with
   a provider; the provider union; exactly one target identifier; only `AWS` is
-  accepted until the other clouds land. `provider.type` is immutable.
+  accepted until the other clouds land (AWS and GCP now). `provider.type` is
+  immutable.
   `adminCredentialsSecretRef` stays required: the operator logs in to the data
   plane as an administrator with a password. IAM administrator login is Azure
   only (decision 4).
@@ -52,16 +53,17 @@ no `discovered` field, and its probe reports only conditions it chooses.
   overridden) address, with the same verified TLS. Password mode reuses the
   role logic of the self-hosted backend; the binding gains `cloud`,
   `authMode: Password` and `region`.
-- **IAM mode (AWS)** is `authMode: IAM` on a `DatabaseRole` of an AWS server
-  (see "AWS IAM mode" below). On a server that is not a cloud one the claim is
-  still refused with `AuthModeUnsupported` and creates nothing, as it is
-  for the other clouds until NKdb-2 and NKdb-3. `authMode` is immutable, and CEL
-  forbids `rotationPolicy` with `IAM`.
+- **IAM mode** is `authMode: IAM` on a `DatabaseRole` of an AWS or a GCP server
+  (see "AWS IAM mode" and "GCP" below). On a server that is not one of these
+  (self-hosted, or a cloud whose IAM mode is not implemented yet, Azure until
+  NKdb-3) the claim is refused with `AuthModeUnsupported` and creates nothing:
+  the gate names the providers that support IAM, it is not "any provider".
+  `authMode` is immutable, and CEL forbids `rotationPolicy` with `IAM`.
 - **Reasons.** The library has no constants for the new reasons; they are local
   (`internal/controller/cloud.go`): `CredentialsNamespaceForbidden`,
   `CredentialsUnavailable`, `TargetNotFound`, `EndpointOverrideForbidden`,
-  `CloudError` (server) and `AuthModeUnsupported` and `RotationNotApplicable`
-  (claim). The probe
+  `CloudError` (server) and `AuthModeUnsupported`, `RotationNotApplicable` and
+  `IAMPrincipalRequired` (claim). The probe
   reconciler fixes the reason of `Ready` and `ServerReachable`, so the server
   reasons are on a separate condition, `CloudResolved`, and a claim's
   `AuthModeUnsupported` is a Warning Event with that reason (the lifecycle sets
@@ -127,6 +129,104 @@ no `discovered` field, and its probe reports only conditions it chooses.
   that says its binding can be rebuilt from `Update`), which is the follow-up
   to raise for a lib minor release.
 
+### GCP (Cloud SQL for PostgreSQL)
+
+- **API.** `spec.provider` takes `type: GCP` and `gcp: {project, location,
+  instance, endpointOverride?}` (`cloud.GCPBlock` / `cloud.GCPClusterBlock`
+  plus `instance`, pattern `^[a-z]([-a-z0-9]*[a-z0-9])?$`, at most 98). A
+  Cloud SQL instance is regional, so CEL requires `location` on both kinds
+  (the drafts say "where regional"). CEL on the server spec now admits `AWS`
+  and `GCP`, and each block is required exactly with its type. The rules of
+  AWS apply unchanged: `host` is optional with a provider, a namespaced server
+  must use `credentials.source: Secret`, `endpointOverride` is on cluster
+  kinds only and honoured only in `allow-private`. `DatabaseRole` gains
+  `spec.iam.principal` (1 to 320 characters, immutable; `iam` is allowed only
+  with `authMode: IAM`), the field of the drafts' `CloudAuth`.
+- **Credentials.** `credentials.source` is `WorkloadIdentity` (Application
+  Default Credentials) or `Secret` with the key `credentials.json`, a
+  `service_account` key only (decision 10); `cloud.Egress.GCP` resolves it and
+  its HTTP client dials through the egress policy, the token endpoint
+  included. Errors are categories: the SDK text, the key, the project and the
+  principal never reach a condition, Event or log from this code.
+- **Discovery.** The probe calls `instances.get` of the Cloud SQL Admin API
+  (`sqladmin/v1`) with that client and records `endpoint`, `port` (5432, the
+  port of every Cloud SQL PostgreSQL instance), `region`,
+  `instanceConnectionName` and `dnsName` in `status.discovered`. The
+  connection name the API reports must equal `project:location:instance`,
+  derived from the spec: the API looks an instance up by project and name only,
+  so this is what checks `location` (otherwise `TargetNotFound`). An instance
+  that is not PostgreSQL is refused. The endpoint is the instance's IP address:
+  the private one when the operator runs with `EGRESS_MODE=allow-private` and
+  the instance has one, else the public one; an address that is not routable
+  unicast (loopback, link-local, unspecified, multicast) is ignored. Whatever is
+  chosen, the egress policy still decides at dial time, so a private IP needs
+  `allow-private`. `dnsName` (reported with a trailing dot, which is removed)
+  is kept only when it is a plain DNS name.
+- **Admin connection.** The password Secret of `adminCredentialsSecretRef`
+  (decision 4), over the same verified TLS as every other server, to the
+  discovered IP address, **not** through `cloudsqlconn`. Reasons: the connector
+  needs the Cloud SQL Admin API for the ephemeral certificate of every
+  connection and dials its own sockets, which would need a bridge to the
+  operator's egress dialer; the admin login is a password, so the connector's
+  IAM authentication would not be used; and the connector cannot be tested
+  against the CI data plane (a PostgreSQL container). The server certificate of
+  an instance is checked against `tls.caBundle` (the instance's server CA) and,
+  as it names a host and not an IP address, the TLS server name defaults to the
+  discovered `dnsName` when `tls.serverName` is unset and `spec.host` is not
+  used; an explicit `tls.serverName` wins. An instance whose certificate carries
+  no DNS name (an older server CA mode) needs `tls.serverName` set to a name the
+  certificate does carry, which Go can only match as a DNS or IP SAN: such an
+  instance is not reachable by this path, and the operator does not skip the
+  verification. `cloudsqlconn` stays a module dependency pinned by
+  `internal/clouddeps`, because it is the consumer's connector (below).
+- **Password mode** reuses the role logic of the self-hosted backend. The
+  binding gains `cloud` (`gcp`), `authMode: Password` and
+  `instanceConnectionName`, and no `region` (that key is AWS only).
+- **IAM mode.** `iam.principal` is required (`IAMPrincipalRequired` otherwise,
+  also for a malformed one, and refused on AWS) and names the database user:
+  the e-mail of a Google account, or the e-mail of a service account without
+  `.gserviceaccount.com` (`name@project.iam`), in lower case and at most 63
+  characters, because it is also a PostgreSQL role name. The user type is read
+  from the form: a name ending in `.iam` is `CLOUD_IAM_SERVICE_ACCOUNT`, any
+  other is `CLOUD_IAM_USER`. The operator
+  - checks the role in PostgreSQL first, as ADR 0002 section 16.4 requires: a
+    role of that name that exists without the claim's marker, or with another
+    claim's, is a `NameCollision` and nothing is called;
+  - otherwise calls `users.insert` (the Admin API answers with a long-running
+    operation, which the operator follows with `operations.get` for up to two
+    minutes, so the marker is written in the same call), and sets the marker
+    (`COMMENT ON ROLE`) right after it; a crash between the two leaves a role
+    without a marker that reads as a `NameCollision` until an administrator
+    removes it: it fails closed;
+  - applies the connection limit (only when it differs) and the same grants as
+    password mode directly to that role, then writes the full marker last.
+  Cloud SQL forces the principal-derived role name, the one exception to "a
+  claim cannot choose its external name" (decision 6, ADR 0002 16.4); the claim
+  names it in `iam.principal`, which is immutable, and the role name is kept in
+  `status.externalName`, from which the delete is done. A tenant can name any
+  principal in the project and give it access to its own database; it gains
+  nothing outside that database. The IAM user has no password and is not a
+  member of any role the operator creates.
+- **Binding Secret (IAM).** `type`, `provider`, `cloud` (`gcp`), `authMode`
+  (`IAM`), `instanceConnectionName`, `host`, `port`, `database`, `username`
+  (the principal), `sslmode` and `sslrootcert`. There is **no `password`, no
+  `uri`, and no `region` or `iamResourceArn`**. The consumer connects through
+  the Cloud SQL connector with IAM authentication (`cloudsqlconn`
+  `WithIAMAuthN`), which refreshes the token itself; `host` and `port` are
+  there for a consumer that goes through the instance's address. No rotation
+  (`RotationNotApplicable` Event on the annotation, `status.rotation` empty).
+- **Deletion.** Only a role that carries the claim's marker is touched. Its
+  sessions are ended (best effort, as in password mode), the admin role is made
+  a member of it (best effort; `REASSIGN OWNED` needs it) and takes over the
+  objects it owns (`REASSIGN OWNED`, `DROP OWNED`), and then `users.delete`
+  removes the user, which drops the role. A user that is gone already is not an
+  error. A failing `users.delete` keeps the claim and its finalizer.
+- **IAM permissions the operator needs (GCP):** `cloudsql.instances.get`,
+  `cloudsql.users.create` and `cloudsql.users.delete` on the instance (for
+  example the predefined `roles/cloudsql.admin`, or a custom role), and
+  `cloudsql.instances.get` alone for a server that serves only Password
+  claims. The operator creates no identity or grant.
+
 ## Consequences
 
 - The drafts' `discovered` lives in a local status type until the library's
@@ -138,5 +238,15 @@ no `discovered` field, and its probe reports only conditions it chooses.
   CI cannot verify. The IAM role's SQL runs against PostgreSQL 18 with a
   stand-in `rds_iam` role; no emulator validates an IAM token, so the login with
   a token is untested in CI.
-- The operator now imports the AWS SDK (`service/rds`), which grows its module
+- The operator now imports the AWS SDK (`service/rds`) and the Cloud SQL Admin
+  API client (`google.golang.org/api/sqladmin/v1`), which grow its module
   graph; all modules are Apache-2.0.
+- sqladmin has no emulator. Its calls are tested against an HTTP fake that
+  returns recorded response shapes (`instances.get`, `users.insert` and
+  `users.delete`, `operations.get`), reached through `cloud.Egress.GCP` with a
+  service account key whose token endpoint is the fake too. The integration
+  job runs the same fake as a Go test server and the TLS PostgreSQL container
+  as the "Cloud SQL" data plane. Whether Cloud SQL accepts the operator's
+  statements on the roles it creates (`ALTER ROLE`, `GRANT ... TO
+  CURRENT_USER`, `REASSIGN OWNED`) and the IAM login itself are untested in CI
+  ([NFR-0005](../nfrs/NFR-0005-cloud-credentials-and-egress.md)).

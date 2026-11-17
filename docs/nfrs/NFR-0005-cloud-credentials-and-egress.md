@@ -3,7 +3,8 @@
 ## Status
 
 Implemented for the AWS backend in password mode (NKdb-1a) and IAM mode
-(NKdb-1b). The GCP and Azure backends add to its verification.
+(NKdb-1b) and for the GCP backend (Cloud SQL, NKdb-2). The Azure backend adds to
+its verification.
 
 ## Attribute
 
@@ -34,9 +35,19 @@ plan Track NK, rows EB-2, EB-3, EB-5, EB-9 and EB-14).
   grants. Its AWS permissions are `rds:DescribeDBInstances` and
   `rds:DescribeDBClusters`. In IAM mode it builds no token and holds no
   `rds-db:connect`: the consumer's own role does, on the ARN in the binding.
+  Its GCP permissions are `cloudsql.instances.get`, and for IAM claims
+  `cloudsql.users.create` and `cloudsql.users.delete`; the consumer connects
+  as its own identity through the Cloud SQL connector.
 - An IAM-mode binding has no password and no `uri`; the role it names is
   created without a password and is the claim's only if it carries the claim's
-  marker, so a tenant cannot take over or drop another role.
+  marker, so a tenant cannot take over or drop another role. On Cloud SQL
+  the database user is named by the claim's `iam.principal`, so the marker is
+  checked before `users.insert` and `users.delete` is called only for a role
+  that carries it.
+- A GCP key accepted from a Secret is a `service_account` key only, and the
+  Cloud SQL Admin API client is the one `cloud.Egress.GCP` builds (token
+  endpoint included); its error text, which names the project, the instance
+  and the principal, is never kept.
 
 ## Source
 
@@ -55,6 +66,20 @@ ADR 0002 section 16 of lib-operator-go.
   rotation, drop); `TestApplyIAMRole` in `internal/pgclient` (quoting, the
   ownership check before any statement); CEL in `api/v1alpha1`
   (`TestProviderRules`).
+- Unit, GCP (`internal/controller/gcp_test.go`, `internal/pgclient`):
+  `TestDescribeCloudSQL` and `TestDescribeCloudSQLFailuresAreCategories`
+  (recorded `instances.get` shapes; the API text does not leak),
+  `TestDiscoverGCP` (the key's token reaches the API through `cloud.Egress.GCP`;
+  strict mode refuses `endpointOverride`; a missing Secret and an
+  `external_account` key are refused), `TestWaitOperation`,
+  `TestGCPIAMRoleLifecycle` (marker before the grants, no password, the binding,
+  no rotation, collision calls nothing, deletion), `TestIAMPrincipalChecks`,
+  `TestApplyCloudSQLIAMRole` and `TestDropCloudSQLIAMRole` (quoting, ownership
+  before `users.insert`/`users.delete`); CEL (`TestGCPProviderRules`,
+  `TestIAMPrincipalRules`).
+- Integration (job `cloudsql`): the Admin API fake as a Go test server and the TLS
+  PostgreSQL at a private address (`TestCloudSQLProbeDiscoversAndConnects`,
+  `TestCloudSQLIAMRole`).
 - Integration (`.github/workflows/integration.yml`, job `rds`): moto server and
   the TLS PostgreSQL at private container addresses with `allow-private` in the
   test wiring (`TestRDSProbeDiscoversAndConnects`,
@@ -62,7 +87,13 @@ ADR 0002 section 16 of lib-operator-go.
   (login role, `rds_iam` membership, no password, privileges, drop),
   `TestRDSIAMRoleNameCollision` (a role that is not the claim's is left alone)
   and `TestRDSIAMResourceARN` (the ARN against what moto reports).
-- **Untested in CI:** that real AWS accepts the operator's credentials, the
+- **Untested in CI (GCP):** sqladmin and IAM token validation against a real
+  service: that Cloud SQL accepts the operator's credentials, the
+  WorkloadIdentity chain (GKE), `users.insert` and `users.delete` with real
+  operations, that the statements the operator runs on the roles Cloud SQL
+  creates are permitted to the admin user, and IAM database authentication with
+  the consumer's identity (there is no emulator for either).
+- **Untested in CI (AWS):** that real AWS accepts the operator's credentials, the
   WorkloadIdentity chain (IRSA, Pod Identity), AssumeRole through `roleARN`, and
   RDS IAM token validation: whether RDS accepts a token for the login role and
   the `rds-db:connect` policy on the ARN in the binding (the test PostgreSQL has

@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,60 @@ func awsNamespaced(name string) *DatabaseServer {
 	return s
 }
 
+func gcpCluster(name string) *ClusterDatabaseServer {
+	s := clusterServerObj(name)
+	s.Spec.Host = ""
+	s.Spec.Provider = &ClusterProvider{Type: cloud.ProviderGCP, GCP: &ClusterGCPDatabase{
+		GCPClusterBlock: cloud.GCPClusterBlock{GCPBlock: cloud.GCPBlock{Project: "proj-12345", Location: "europe-west1"}},
+		GCPTarget:       GCPTarget{Instance: "orders"},
+	}}
+	return s
+}
+
+func gcpNamespaced(name string) *DatabaseServer {
+	s := serverObj(name)
+	s.Spec.Host = ""
+	s.Spec.Provider = &Provider{Type: cloud.ProviderGCP, GCP: &GCPDatabase{
+		GCPBlock: cloud.GCPBlock{Project: "proj-12345", Location: "europe-west1"}, GCPTarget: GCPTarget{Instance: "orders"}}}
+	s.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "gcp"}}
+	return s
+}
+
+// A Cloud SQL server: the provider.gcp block, its target and location, and the
+// rules it shares with AWS.
+func TestGCPProviderRules(t *testing.T) {
+	g := NewWithT(t)
+	g.Expect(k8sClient.Create(ctx, gcpCluster("gcp-ok"))).To(Succeed())
+	secret := gcpCluster("gcp-secret")
+	secret.Spec.Credentials = &cloud.Credentials{Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "gcp", Namespace: "operator-db-system"}}
+	secret.Spec.Provider.GCP.EndpointOverride = "http://sqladmin.example.test:8080"
+	g.Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+	g.Expect(k8sClient.Create(ctx, gcpNamespaced("gcp-ns"))).To(Succeed())
+
+	noBlock := gcpCluster("gcp-no-block")
+	noBlock.Spec.Provider.GCP = nil
+	invalid(t, noBlock, "gcp is required with type GCP")
+	noLocation := gcpCluster("gcp-no-location")
+	noLocation.Spec.Provider.GCP.Location = ""
+	invalid(t, noLocation, "location is required for a Cloud SQL instance")
+	noLocationNS := gcpNamespaced("gcp-no-location-ns")
+	noLocationNS.Spec.Provider.GCP.Location = ""
+	invalid(t, noLocationNS, "location is required for a Cloud SQL instance")
+	noInstance := gcpCluster("gcp-no-instance")
+	noInstance.Spec.Provider.GCP.Instance = ""
+	invalid(t, noInstance, "instance")
+	badInstance := gcpCluster("gcp-bad-instance")
+	badInstance.Spec.Provider.GCP.Instance = "Orders_1"
+	invalid(t, badInstance, "instance")
+	badProject := gcpCluster("gcp-bad-project")
+	badProject.Spec.Provider.GCP.Project = "X"
+	invalid(t, badProject, "project")
+	// A namespaced server cannot use WorkloadIdentity.
+	wi := gcpNamespaced("gcp-ns-wi")
+	wi.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceWorkloadIdentity}
+	invalid(t, wi, "must use source Secret")
+}
+
 func TestProviderRules(t *testing.T) {
 	g := NewWithT(t)
 
@@ -66,9 +121,22 @@ func TestProviderRules(t *testing.T) {
 	noBlock := awsCluster("no-block")
 	noBlock.Spec.Provider.AWS = nil
 	invalid(t, noBlock, "aws is required with type AWS")
-	gcp := awsCluster("gcp")
-	gcp.Spec.Provider.Type = cloud.ProviderGCP
-	invalid(t, gcp, "only provider.type AWS is supported")
+	azure := awsCluster("azure")
+	azure.Spec.Provider.Type = cloud.ProviderAzure
+	invalid(t, azure, "only provider.type AWS and GCP are supported")
+	azureNS := awsNamespaced("azure-ns")
+	azureNS.Spec.Provider.Type = cloud.ProviderAzure
+	invalid(t, azureNS, "only provider.type AWS and GCP are supported")
+	// The block must be the one of the type.
+	gcpTypeAWSBlock := awsCluster("gcp-type-aws-block")
+	gcpTypeAWSBlock.Spec.Provider.Type = cloud.ProviderGCP
+	invalid(t, gcpTypeAWSBlock, "gcp is required with type GCP")
+	awsTypeGCPBlock := gcpCluster("aws-type-gcp-block")
+	awsTypeGCPBlock.Spec.Provider.Type = cloud.ProviderAWS
+	invalid(t, awsTypeGCPBlock, "aws is required with type AWS")
+	both2 := gcpCluster("both-blocks")
+	both2.Spec.Provider.AWS = awsCluster("x").Spec.Provider.AWS
+	invalid(t, both2, "aws is required with type AWS and forbidden otherwise")
 	none := awsCluster("no-target")
 	none.Spec.Provider.AWS.DBInstanceIdentifier = ""
 	invalid(t, none, "exactly one of dbInstanceIdentifier and dbClusterIdentifier")
@@ -130,6 +198,29 @@ func TestStatusDiscoveredAndAuthMode(t *testing.T) {
 	iam.Spec.AuthMode = AuthModeIAM
 	iam.Spec.RotationPolicy = rotationPolicy()
 	invalid(t, iam, "rotationPolicy is not allowed with authMode IAM")
+}
+
+// iam.principal: only with authMode IAM, bounded, and immutable.
+func TestIAMPrincipalRules(t *testing.T) {
+	g := NewWithT(t)
+	ok := roleObj("principal-ok")
+	ok.Spec.AuthMode = AuthModeIAM
+	ok.Spec.IAM = &IAMSpec{Principal: "app@proj-12345.iam"}
+	g.Expect(k8sClient.Create(ctx, ok)).To(Succeed())
+	ok.Spec.IAM.Principal = "other@proj-12345.iam"
+	g.Expect(k8sClient.Update(ctx, ok)).To(MatchError(ContainSubstring("iam.principal is immutable")))
+
+	password := roleObj("principal-password")
+	password.Spec.IAM = &IAMSpec{Principal: "app@proj-12345.iam"}
+	invalid(t, password, "iam is allowed only with authMode IAM")
+	empty := roleObj("principal-empty")
+	empty.Spec.AuthMode = AuthModeIAM
+	empty.Spec.IAM = &IAMSpec{}
+	invalid(t, empty, "principal")
+	long := roleObj("principal-long")
+	long.Spec.AuthMode = AuthModeIAM
+	long.Spec.IAM = &IAMSpec{Principal: strings.Repeat("a", 321)}
+	invalid(t, long, "principal")
 }
 
 func TestTarget(t *testing.T) {
