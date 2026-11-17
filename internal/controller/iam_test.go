@@ -213,3 +213,19 @@ func TestIAMRoleOnASelfHostedServer(t *testing.T) {
 	h.rec.AssertEvent(t, "Warning", ReasonAuthModeUnsupported, "")
 	h.fake.wantNot(t, "CREATE ROLE", "GRANT")
 }
+
+// A failing apply is the claim's error, and no binding is written.
+func TestIAMRoleApplyFailure(t *testing.T) {
+	h := cloudHarness(t, common.DeletionRetain)
+	rr := &RoleReconciler{h.cfg}
+	h.reconcileOK(&DatabaseReconciler{h.cfg}, h.database("orders", nil))
+	role := h.role("orders-iam", "orders", iamClaim)
+	h.fake.failOn = "rds_iam"
+	if err := h.reconcile(rr, role); !errors.Is(err, errStatement) {
+		t.Errorf("failing grant: %v", err)
+	}
+	h.get(role)
+	if role.Status.Binding != nil {
+		t.Errorf("a binding was written: %+v", role.Status.Binding)
+	}
+}

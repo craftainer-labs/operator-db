@@ -26,6 +26,12 @@ import (
 	"github.com/craftainer-labs/operator-db/internal/pgclient"
 )
 
+// rdsAdmin is the admin of sv for a server reached at a bare container address:
+// the certificate names tlsServer, not the address.
+func rdsAdmin(sv server) pgclient.Admin {
+	return sv.admin(func(t *pgclient.Target) { t.ServerName = tlsServer })
+}
+
 // createRDSIAM creates the rds_iam role if the server does not have it, as RDS
 // does for every instance.
 func createRDSIAM(t *testing.T, admin pgclient.Admin) {
@@ -41,7 +47,7 @@ func createRDSIAM(t *testing.T, admin pgclient.Admin) {
 func TestRDSIAMRole(t *testing.T) {
 	ctx := context.Background()
 	sv := load(t)
-	admin := sv.admin()
+	admin := rdsAdmin(sv)
 	createRDSIAM(t, admin)
 	db := newDatabase(t, admin, "it/iam/db-uid")
 	const claim = "it/iam/role-uid"
@@ -121,7 +127,7 @@ func TestRDSIAMRole(t *testing.T) {
 func TestRDSIAMRoleNameCollision(t *testing.T) {
 	ctx := context.Background()
 	sv := load(t)
-	admin := sv.admin()
+	admin := rdsAdmin(sv)
 	createRDSIAM(t, admin)
 	db := newDatabase(t, admin, "it/iamx/db-uid")
 	const claim = "it/iamx/role-uid"
