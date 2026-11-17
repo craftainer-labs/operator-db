@@ -26,6 +26,7 @@ import (
 	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
+	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
 	dbv1alpha1 "github.com/craftainer-labs/operator-db/api/v1alpha1"
@@ -425,6 +426,9 @@ func TestDescribeCloudSQLFailuresAreCategories(t *testing.T) {
 	if e := sqlAdminErr(timeoutErr{}); !isTransient(e) {
 		t.Error("a network timeout is not transient")
 	}
+	if e := sqlAdminErr(context.Canceled); !isTransient(e) {
+		t.Error("a cancelled context is not transient")
+	}
 	if e := sqlAdminErr(errors.New("x")); isTransient(e) || httpStatus(errors.New("x")) != 0 {
 		t.Error("a plain error is transient")
 	}
@@ -602,6 +606,29 @@ func TestWaitOperation(t *testing.T) {
 		t.Errorf("delete of a gone user: %v", err)
 	}
 	delete(f.fail, "DELETE users")
+	// A delete that runs is pending, not waited for; so is a busy instance.
+	f.insertDone = false
+	before = f.count("GET /v1/projects/proj-12345/operations/")
+	for name, prep := range map[string]func(){
+		"running": func() {}, "busy": func() { f.fail["DELETE users"] = http.StatusConflict },
+	} {
+		prep()
+		var pe *lifecycle.PendingError
+		if err = deleteIAMUser(ctx, api, cs, gcpPrincipal); !errors.As(err, &pe) || pe.Reason != conditions.Deleting ||
+			pe.After != sqlAdminRequeue || strings.Contains(err.Error(), gcpPrincipal) {
+			t.Errorf("%s: %v", name, err)
+		}
+		delete(f.fail, "DELETE users")
+	}
+	if f.count("GET /v1/projects/proj-12345/operations/") != before {
+		t.Error("the delete operation was polled")
+	}
+	// One that finished with an error is a category.
+	f.insertDone, f.opErr = true, true
+	if err = deleteIAMUser(ctx, api, cs, gcpPrincipal); reasonOf(t, err) != ReasonCloudError {
+		t.Errorf("failed delete: %v", err)
+	}
+	f.opErr = false
 	sqlAdminPoll, sqlAdminWait = time.Millisecond, 5*time.Second
 	f.pending, f.insertDone = 0, true
 	if err = deleteIAMUser(ctx, api, cs, "app@proj-12345.iam"); err != nil {
@@ -761,6 +788,35 @@ func TestGCPIAMRoleDeleteFailure(t *testing.T) {
 		t.Fatal("the claim was released with its user still there")
 	}
 	delete(f.fail, "DELETE users")
+	h.reconcileOK(rr, role)
+	if !h.gone(role) {
+		t.Error("the claim is still there")
+	}
+}
+
+// A user whose deletion runs keeps the claim without an error: it is requeued
+// (Deleting), and released when the API says the user is gone.
+func TestGCPIAMRoleDeletePending(t *testing.T) {
+	f := newFakeSQL(t)
+	h := gcpHarness(t, f)
+	rr := &RoleReconciler{h.cfg}
+	h.reconcileOK(&DatabaseReconciler{h.cfg}, h.database("orders", nil))
+	role := h.role("orders-iam", "orders", gcpIAMClaim(gcpPrincipal))
+	f.insertDone = true
+	h.reconcileOK(rr, role)
+	h.get(role)
+	claim := h.ns + "/orders-iam/" + string(role.UID)
+	h.fake.answer = iamRoleAnswer(gcpPrincipal, claim, "ReadWrite")
+
+	f.insertDone = false
+	h.must(env.Client.Delete(context.Background(), role))
+	h.reconcileOK(rr, role)
+	if h.gone(role) {
+		t.Fatal("the claim was released with its user still being deleted")
+	}
+	h.get(role)
+	h.wantCondition(role.Status.Conditions, conditions.Ready, metav1.ConditionFalse, conditions.Deleting)
+	f.fail["DELETE users"] = http.StatusNotFound
 	h.reconcileOK(rr, role)
 	if !h.gone(role) {
 		t.Error("the claim is still there")

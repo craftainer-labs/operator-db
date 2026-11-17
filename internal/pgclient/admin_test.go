@@ -716,7 +716,8 @@ func TestDropCloudSQLIAMRole(t *testing.T) {
 		t.Fatalf("drop: %v, skipped %v, removed %d", err, skipped, removed)
 	}
 	f.want(t, `|SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '`+base+`'`,
-		`|GRANT `+q+` TO CURRENT_USER`, `db|REASSIGN OWNED BY `+q+` TO CURRENT_USER`, `db|DROP OWNED BY `+q)
+		`|GRANT `+q+` TO CURRENT_USER`, `db|REASSIGN OWNED BY `+q+` TO CURRENT_USER`, `db|DROP OWNED BY `+q,
+		`|REVOKE `+q+` FROM CURRENT_USER`)
 	f.wantNot(t, "DROP ROLE")
 
 	// Foreign roles are skipped, and so is a role that is not there.
@@ -747,6 +748,20 @@ func TestDropCloudSQLIAMRole(t *testing.T) {
 	if _, err = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove); err != nil || removed != 3 {
 		t.Errorf("grant refused: %v, removed %d", err, removed)
 	}
+
+	// The membership is taken back also when the hand-over failed, and a
+	// revoke that fails is not an error (and does not name the role).
+	f = &fakePG{rows: ours, failOn: "REASSIGN OWNED"}
+	_, _ = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove)
+	f.want(t, `|REVOKE `+q+` FROM CURRENT_USER`)
+	f = &fakePG{rows: ours, failOn: "REVOKE"}
+	if _, err = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove); err != nil || removed != 4 {
+		t.Errorf("revoke refused: %v, removed %d", err, removed)
+	}
+	// Without the grant there is nothing to revoke.
+	f = &fakePG{rows: ours, failOn: "GRANT " + q}
+	_, _ = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove)
+	f.wantNot(t, "REVOKE")
 
 	for _, fail := range []string{"pg_roles", "pg_terminate_backend", "REASSIGN OWNED"} {
 		f = &fakePG{rows: ours, failOn: fail}

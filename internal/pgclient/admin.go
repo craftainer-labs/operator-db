@@ -497,7 +497,8 @@ func (a Admin) ApplyCloudSQLIAMRole(ctx context.Context, p RoleParams, insert fu
 }
 
 // DropCloudSQLIAMRole removes the Cloud SQL IAM user of a claim: its sessions
-// are ended, the objects it owns go to the admin role, and remove deletes the
+// are ended, the objects it owns go to the admin role, the admin role's
+// temporary membership (the grant REASSIGN OWNED needs) is revoked, and remove deletes the
 // user with the Admin API, which drops the role. A role that is not the
 // claim's (no marker, or another claim's) is left alone and reported as
 // skipped, so the operator never drops a user it cannot show it created.
@@ -511,6 +512,7 @@ func (a Admin) DropCloudSQLIAMRole(ctx context.Context, base, claim, database st
 		return true, nil
 	}
 	ident, literal := Ident(base), Literal(base)
+	granted := false
 	err = a.with(ctx, "", func(s Session) error {
 		_, err := s.Query(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = "+literal)
 		if err != nil && !insufficientPrivilege(err) {
@@ -522,7 +524,9 @@ func (a Admin) DropCloudSQLIAMRole(ctx context.Context, base, claim, database st
 		if err := s.Exec(ctx, "GRANT "+ident+" TO CURRENT_USER"); err != nil {
 			log.FromContext(ctx).Info("the admin role could not be made a member of the Cloud SQL IAM role being dropped",
 				"cause", redact(err, base).Error())
+			return nil
 		}
+		granted = true
 		return nil
 	})
 	if err != nil {
@@ -531,6 +535,16 @@ func (a Admin) DropCloudSQLIAMRole(ctx context.Context, base, claim, database st
 	err = a.with(ctx, database, func(s Session) error {
 		return execAll(ctx, s, []string{"REASSIGN OWNED BY " + ident + " TO CURRENT_USER", "DROP OWNED BY " + ident})
 	})
+	if granted {
+		// The membership was only for the hand-over: take it back, also when the
+		// hand-over failed or the user's deletion is still running, so it does
+		// not outlive the role's drop. Best effort, like the grant.
+		rerr := a.with(ctx, "", func(s Session) error { return s.Exec(ctx, "REVOKE "+ident+" FROM CURRENT_USER") })
+		if rerr != nil {
+			log.FromContext(ctx).Info("the admin role's membership of the Cloud SQL IAM role could not be revoked",
+				"cause", redact(rerr, base).Error())
+		}
+	}
 	if err != nil && !errors.Is(err, ErrNoDatabase) {
 		return false, err
 	}
