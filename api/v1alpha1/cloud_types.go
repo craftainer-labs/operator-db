@@ -19,8 +19,15 @@ const (
 	DiscoveredResourceID = "resourceId"
 	// DiscoveredAccountID is the AWS account that owns the target.
 	DiscoveredAccountID = "accountId"
-	// DiscoveredRegion is the AWS region of the target.
+	// DiscoveredRegion is the AWS region of the target, or the Cloud SQL
+	// instance's region.
 	DiscoveredRegion = "region"
+	// DiscoveredInstanceConnectionName is the Cloud SQL connection name
+	// (project:location:instance), as the Cloud SQL Admin API reports it.
+	DiscoveredInstanceConnectionName = "instanceConnectionName"
+	// DiscoveredDNSName is the Cloud SQL instance's DNS name, the host name its
+	// server certificate carries when it has one.
+	DiscoveredDNSName = "dnsName"
 )
 
 // AWSTarget names the RDS database a server stands for: exactly one of
@@ -56,24 +63,58 @@ type ClusterAWSDatabase struct {
 	AWSTarget             `json:",inline"`
 }
 
+// GCPTarget names the Cloud SQL instance a server stands for. With the
+// block's project and location it makes the connection name
+// project:location:instance.
+type GCPTarget struct {
+	// instance is the Cloud SQL instance name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=98
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?$`
+	Instance string `json:"instance"`
+}
+
+// GCPDatabase is provider.gcp of a namespaced server (no endpointOverride).
+// Cloud SQL instances are regional, so location is required.
+// +kubebuilder:validation:XValidation:rule="has(self.location) && size(self.location) > 0",message="location is required for a Cloud SQL instance"
+type GCPDatabase struct {
+	cloud.GCPBlock `json:",inline"`
+	GCPTarget      `json:",inline"`
+}
+
+// ClusterGCPDatabase is provider.gcp of a cluster server.
+// +kubebuilder:validation:XValidation:rule="has(self.location) && size(self.location) > 0",message="location is required for a Cloud SQL instance"
+type ClusterGCPDatabase struct {
+	cloud.GCPClusterBlock `json:",inline"`
+	GCPTarget             `json:",inline"`
+}
+
 // Provider says the server is a managed cloud database. Absent: self-hosted.
 // +kubebuilder:validation:XValidation:rule="self.type == 'AWS' ? has(self.aws) : !has(self.aws)",message="aws is required with type AWS and forbidden otherwise"
+// +kubebuilder:validation:XValidation:rule="self.type == 'GCP' ? has(self.gcp) : !has(self.gcp)",message="gcp is required with type GCP and forbidden otherwise"
 type Provider struct {
-	// type is the cloud. Only AWS is supported in this version.
+	// type is the cloud: AWS or GCP in this version.
 	Type cloud.ProviderType `json:"type"`
 	// aws holds the AWS settings.
 	// +optional
 	AWS *AWSDatabase `json:"aws,omitempty"`
+	// gcp holds the Google Cloud settings (a Cloud SQL instance).
+	// +optional
+	GCP *GCPDatabase `json:"gcp,omitempty"`
 }
 
 // ClusterProvider is the provider of a cluster server.
 // +kubebuilder:validation:XValidation:rule="self.type == 'AWS' ? has(self.aws) : !has(self.aws)",message="aws is required with type AWS and forbidden otherwise"
+// +kubebuilder:validation:XValidation:rule="self.type == 'GCP' ? has(self.gcp) : !has(self.gcp)",message="gcp is required with type GCP and forbidden otherwise"
 type ClusterProvider struct {
-	// type is the cloud. Only AWS is supported in this version.
+	// type is the cloud: AWS or GCP in this version.
 	Type cloud.ProviderType `json:"type"`
 	// aws holds the AWS settings.
 	// +optional
 	AWS *ClusterAWSDatabase `json:"aws,omitempty"`
+	// gcp holds the Google Cloud settings (a Cloud SQL instance).
+	// +optional
+	GCP *ClusterGCPDatabase `json:"gcp,omitempty"`
 }
 
 // DatabaseServerStatus is the status of both server kinds: the common one and
@@ -82,7 +123,8 @@ type DatabaseServerStatus struct {
 	common.ServerStatus `json:",inline"`
 
 	// discovered is what the probe read from the cloud: endpoint, port,
-	// resourceId, accountId and region.
+	// resourceId, accountId and region on AWS; endpoint, port, region,
+	// instanceConnectionName and dnsName on Cloud SQL.
 	//
 	// +kubebuilder:validation:MaxProperties=10
 	// +kubebuilder:validation:XValidation:rule="self.all(k, size(self[k]) <= 512)",message="values are at most 512 characters"

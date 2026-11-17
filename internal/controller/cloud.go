@@ -117,10 +117,15 @@ func NewRDS(cfg aws.Config) RDSAPI { return rds.NewFromConfig(cfg) }
 // cloudSpec is a server's provider settings, as much of them as discovery
 // uses.
 type cloudSpec struct {
+	// kind is the cloud: only one of the blocks below is set.
+	kind   cloud.ProviderType
 	scope  cloud.Scope
 	block  cloud.AWSClusterBlock
 	target dbv1alpha1.AWSTarget
-	creds  *cloud.Credentials
+	// gcp and gcpTarget are provider.gcp.
+	gcp       cloud.GCPClusterBlock
+	gcpTarget dbv1alpha1.GCPTarget
+	creds     *cloud.Credentials
 	// ns is where a Secret without a namespace of its own lives: the server's.
 	ns string
 }
@@ -129,30 +134,40 @@ type cloudSpec struct {
 func cloudOf(srv server.Server) *cloudSpec {
 	switch s := srv.(type) {
 	case *dbv1alpha1.ClusterDatabaseServer:
-		if s.Spec.Provider == nil || s.Spec.Provider.AWS == nil {
-			return nil
+		p := s.Spec.Provider
+		switch {
+		case p == nil:
+		case p.AWS != nil:
+			return &cloudSpec{kind: cloud.ProviderAWS, scope: cloud.ScopeCluster, block: p.AWS.AWSClusterBlock, target: p.AWS.AWSTarget, creds: s.Spec.Credentials}
+		case p.GCP != nil:
+			return &cloudSpec{kind: cloud.ProviderGCP, scope: cloud.ScopeCluster, gcp: p.GCP.GCPClusterBlock, gcpTarget: p.GCP.GCPTarget, creds: s.Spec.Credentials}
 		}
-		a := s.Spec.Provider.AWS
-		return &cloudSpec{scope: cloud.ScopeCluster, block: a.AWSClusterBlock, target: a.AWSTarget, creds: s.Spec.Credentials}
 	case *dbv1alpha1.DatabaseServer:
-		if s.Spec.Provider == nil || s.Spec.Provider.AWS == nil {
-			return nil
+		p := s.Spec.Provider
+		switch {
+		case p == nil:
+		case p.AWS != nil:
+			return &cloudSpec{kind: cloud.ProviderAWS, scope: cloud.ScopeNamespaced, block: cloud.AWSClusterBlock{AWSBlock: p.AWS.AWSBlock},
+				target: p.AWS.AWSTarget, creds: s.Spec.Credentials.AsCredentials(), ns: s.Namespace}
+		case p.GCP != nil:
+			return &cloudSpec{kind: cloud.ProviderGCP, scope: cloud.ScopeNamespaced, gcp: cloud.GCPClusterBlock{GCPBlock: p.GCP.GCPBlock},
+				gcpTarget: p.GCP.GCPTarget, creds: s.Spec.Credentials.AsCredentials(), ns: s.Namespace}
 		}
-		a := s.Spec.Provider.AWS
-		return &cloudSpec{scope: cloud.ScopeNamespaced, block: cloud.AWSClusterBlock{AWSBlock: a.AWSBlock}, target: a.AWSTarget,
-			creds: s.Spec.Credentials.AsCredentials(), ns: s.Namespace}
 	}
 	return nil
 }
 
-// discover reads the data-plane address of a cloud server from the RDS API,
-// with the operator's credentials to the cloud (WorkloadIdentity or the
-// Secret of credentials.secretRef). Every HTTP connection dials through the
-// egress policy. It returns nil for a self-hosted server. The errors are
-// *CloudError, a category each.
+// discover reads the data-plane address of a cloud server from the cloud's
+// API (RDS, or the Cloud SQL Admin API), with the operator's credentials to
+// the cloud (WorkloadIdentity or the Secret of credentials.secretRef). Every
+// HTTP connection dials through the egress policy. It returns nil for a
+// self-hosted server. The errors are *CloudError, a category each.
 func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connection) (map[string]string, error) {
 	if cs == nil {
 		return nil, nil
+	}
+	if cs.kind == cloud.ProviderGCP {
+		return c.discoverGCP(ctx, cs, conn)
 	}
 	secret, err := c.cloudSecret(ctx, cs)
 	if err != nil {
@@ -160,11 +175,8 @@ func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connect
 	}
 	e := cloud.Egress{Mode: c.EgressMode, Policy: c.Egress, Proxy: conn.Proxy}
 	cfg, err := e.AWS(ctx, cs.scope, cs.block, cs.creds, secret)
-	switch {
-	case errors.Is(err, cloud.ErrEndpointOverrideForbidden), errors.Is(err, cloud.ErrInvalidEndpoint):
-		return nil, cloudErr(ReasonEndpointOverrideForbidden, "endpointOverride is not allowed here")
-	case err != nil:
-		return nil, cloudErr(ReasonCredentialsUnavailable, "the cloud credentials are unavailable")
+	if err != nil {
+		return nil, egressErr(err)
 	}
 	if c.RDS == nil {
 		return nil, cloudErr(ReasonCloudError, "no RDS client is configured")
@@ -174,6 +186,14 @@ func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connect
 		defer hc.CloseIdleConnections()
 	}
 	return describe(ctx, c.RDS(cfg), cs.target, cfg.Region)
+}
+
+// egressErr is the category of a failure to build a cloud client.
+func egressErr(err error) error {
+	if errors.Is(err, cloud.ErrEndpointOverrideForbidden) || errors.Is(err, cloud.ErrInvalidEndpoint) {
+		return cloudErr(ReasonEndpointOverrideForbidden, "endpointOverride is not allowed here")
+	}
+	return cloudErr(ReasonCredentialsUnavailable, "the cloud credentials are unavailable")
 }
 
 // cloudSecret reads the credentials Secret, nil unless credentials.source is
@@ -324,10 +344,19 @@ func record(srv server.Server, cs *cloudSpec, disc map[string]string, err error)
 	meta.SetStatusCondition(&st.Conditions, cond)
 }
 
-// regionOf is the AWS region of a cloud server's spec, "" for a self-hosted one.
+// regionOf is the AWS region of a cloud server's spec, "" for a self-hosted
+// one or a Cloud SQL one (whose region is discovered).
 func regionOf(cs *cloudSpec) string {
 	if cs == nil {
 		return ""
 	}
 	return cs.block.Region
+}
+
+// providerOf is the cloud of a server, "" for a self-hosted one.
+func providerOf(cs *cloudSpec) cloud.ProviderType {
+	if cs == nil {
+		return ""
+	}
+	return cs.kind
 }

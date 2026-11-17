@@ -615,3 +615,148 @@ func TestApplyIAMRole(t *testing.T) {
 		}
 	}
 }
+
+// A Cloud SQL IAM role is created by the Admin API, not by SQL: insert runs
+// only for a role that does not exist, and the marker is written right after
+// it, before the grants and again after them. The name is quoted.
+func TestApplyCloudSQLIAMRole(t *testing.T) {
+	ctx := context.Background()
+	p := RoleParams{
+		Base: `app@proj-12345.iam`, Database: "team-a_db_y", Marker: Marker{Claim: "team-a/app/uid-1", Privileges: ReadWrite},
+		ConnLimit: 7, Privileges: ReadWrite,
+	}
+	q := `"app@proj-12345.iam"`
+	inserts := 0
+	insert := func(context.Context) error { inserts++; return nil }
+
+	f := &fakePG{}
+	if err := f.admin().ApplyCloudSQLIAMRole(ctx, p, insert); err != nil {
+		t.Fatal(err)
+	}
+	if inserts != 1 {
+		t.Errorf("insert ran %d times", inserts)
+	}
+	f.want(t,
+		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1'`,
+		`|ALTER ROLE `+q+` WITH CONNECTION LIMIT 7`,
+		`|GRANT CONNECT ON DATABASE "team-a_db_y" TO `+q,
+		`team-a_db_y|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO `+q,
+		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite'`)
+	f.wantNot(t, "CREATE ROLE", "PASSWORD", "rds_iam", "NOLOGIN")
+	// The first marker comes before the grants.
+	first := slices.IndexFunc(f.stmts, func(s string) bool { return strings.Contains(s, "COMMENT ON ROLE") })
+	grant := slices.IndexFunc(f.stmts, func(s string) bool { return strings.Contains(s, "GRANT CONNECT") })
+	if first < 0 || grant < 0 || first > grant {
+		t.Errorf("the marker is not written right after the insert: %v", f.stmts)
+	}
+
+	// A role of ours is updated, and not inserted again; the connection limit is
+	// changed only when it differs.
+	ours := "craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite"
+	f = &fakePG{rows: iamRoleRows(p.Base, ours)}
+	inserts = 0
+	if err := f.admin().ApplyCloudSQLIAMRole(ctx, p, insert); err != nil || inserts != 0 {
+		t.Fatalf("existing role: %v, inserts %d", err, inserts)
+	}
+	f.want(t, `|ALTER ROLE `+q+` WITH CONNECTION LIMIT 7`)
+	p.ConnLimit = -1
+	f = &fakePG{rows: iamRoleRows(p.Base, ours)}
+	if err := f.admin().ApplyCloudSQLIAMRole(ctx, p, insert); err != nil {
+		t.Fatal(err)
+	}
+	f.wantNot(t, "CONNECTION LIMIT", "CREATE ROLE")
+
+	// A role of that name that is not ours is refused before the insert.
+	for _, comment := range []string{"craftainer.dev/claim=someone/else/uid", "hand made", ""} {
+		f = &fakePG{rows: iamRoleRows(p.Base, comment)}
+		inserts = 0
+		if err := f.admin().ApplyCloudSQLIAMRole(ctx, p, insert); !errors.Is(err, ErrNotOwned) || inserts != 0 {
+			t.Errorf("comment %q: %v, inserts %d", comment, err, inserts)
+		}
+		f.wantNot(t, "ALTER", "GRANT", "COMMENT ON")
+	}
+
+	bad := p
+	bad.Privileges = "Root"
+	if err := (&fakePG{}).admin().ApplyCloudSQLIAMRole(ctx, bad, insert); !errors.Is(err, ErrInvalidPrivileges) {
+		t.Errorf("unknown privileges: %v", err)
+	}
+	if err := (&fakePG{failOn: "pg_roles"}).admin().ApplyCloudSQLIAMRole(ctx, p, insert); !errors.Is(err, errBoom) {
+		t.Errorf("observe failure: %v", err)
+	}
+	// A failed insert writes nothing.
+	f = &fakePG{}
+	if err := f.admin().ApplyCloudSQLIAMRole(ctx, p, func(context.Context) error { return errBoom }); !errors.Is(err, errBoom) {
+		t.Errorf("insert failure: %v", err)
+	}
+	f.wantNot(t, "COMMENT ON", "GRANT")
+	for _, fail := range []string{"COMMENT ON ROLE", "ON SCHEMA public"} {
+		f = &fakePG{failOn: fail}
+		if err := f.admin().ApplyCloudSQLIAMRole(ctx, p, insert); !errors.Is(err, errBoom) {
+			t.Errorf("failOn %q: %v", fail, err)
+		}
+	}
+}
+
+// Dropping a Cloud SQL IAM role ends its sessions, hands its objects to the
+// admin role and has the Admin API delete the user; a role that is not the
+// claim's is left alone.
+func TestDropCloudSQLIAMRole(t *testing.T) {
+	ctx := context.Background()
+	const claim = "team-a/app/uid-1"
+	base := "app@proj-12345.iam"
+	q := `"` + base + `"`
+	ours := iamRoleRows(base, markerPrefix+claim)
+	removed := 0
+	remove := func(context.Context) error { removed++; return nil }
+
+	f := &fakePG{rows: ours}
+	skipped, err := f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove)
+	if err != nil || skipped || removed != 1 {
+		t.Fatalf("drop: %v, skipped %v, removed %d", err, skipped, removed)
+	}
+	f.want(t, `|SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '`+base+`'`,
+		`|GRANT `+q+` TO CURRENT_USER`, `db|REASSIGN OWNED BY `+q+` TO CURRENT_USER`, `db|DROP OWNED BY `+q)
+	f.wantNot(t, "DROP ROLE")
+
+	// Foreign roles are skipped, and so is a role that is not there.
+	removed = 0
+	for _, comment := range []string{markerPrefix + "someone/else/uid", "hand made", ""} {
+		f = &fakePG{rows: iamRoleRows(base, comment)}
+		skipped, err = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove)
+		if err != nil || !skipped || removed != 0 || strings.Contains(f.joined(), "REASSIGN") {
+			t.Errorf("comment %q: %v, skipped %v, removed %d", comment, err, skipped, removed)
+		}
+	}
+	skipped, err = (&fakePG{}).admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove)
+	if err != nil || skipped || removed != 0 {
+		t.Errorf("absent role: %v, skipped %v, removed %d", err, skipped, removed)
+	}
+
+	// The database is gone: its objects went with it. An admin that may not end
+	// sessions, or may not grant the membership, still goes on.
+	f = &fakePG{rows: ours, openErr: map[string]error{"db": &pgconn.PgError{Code: "3D000"}}}
+	if _, err = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove); err != nil || removed != 1 {
+		t.Errorf("database gone: %v, removed %d", err, removed)
+	}
+	f = &fakePG{rows: ours, failOn: "pg_terminate_backend", failErr: &pgconn.PgError{Code: "42501"}}
+	if _, err = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove); err != nil || removed != 2 {
+		t.Errorf("no pg_signal_backend: %v, removed %d", err, removed)
+	}
+	f = &fakePG{rows: ours, failOn: "GRANT " + q}
+	if _, err = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove); err != nil || removed != 3 {
+		t.Errorf("grant refused: %v, removed %d", err, removed)
+	}
+
+	for _, fail := range []string{"pg_roles", "pg_terminate_backend", "REASSIGN OWNED"} {
+		f = &fakePG{rows: ours, failOn: fail}
+		if _, err = f.admin().DropCloudSQLIAMRole(ctx, base, claim, "db", remove); !errors.Is(err, errBoom) {
+			t.Errorf("failOn %q: %v", fail, err)
+		}
+	}
+	// The user is deleted last, and its failure is the error.
+	if _, err = (&fakePG{rows: ours}).admin().DropCloudSQLIAMRole(ctx, base, claim, "db",
+		func(context.Context) error { return errBoom }); !errors.Is(err, errBoom) {
+		t.Errorf("remove failure: %v", err)
+	}
+}

@@ -71,7 +71,7 @@ jobs:
           echo "$tmp/$dir" >> "$GITHUB_PATH"
 
       - name: Lint the integration tests
-        run: golangci-lint run --build-tags integration ./test/integration/...
+        run: golangci-lint run --build-tags integration,rds,cloudsql ./test/integration/...
 
       - name: Generate the CA, the server certificate and the admin password
         run: |
@@ -188,3 +188,66 @@ jobs:
       - name: Remove the containers
         if: always()
         run: docker rm -f moto pg
+
+  cloudsql:
+    name: Cloud SQL backend (Admin API fake and PostgreSQL 18)
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER_AMD64 || 'ubuntu-24.04' }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Generate the CA, the server certificate and the admin password
+        run: |
+          set -euo pipefail
+          test/integration/gen-certs.sh "$RUNNER_TEMP/pg-tls"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/pg-tls/admin-password")"
+
+      # The PostgreSQL container is reached at its address on the default
+      # bridge network (a private range), never at loopback: pkg/egress blocks
+      # loopback in both modes. The Cloud SQL Admin API has no emulator: the
+      # test runs a fake of it as a Go test server on a private address of the
+      # runner. EGRESS_MODE=allow-private is in the test's own wiring, not in the
+      # operator's configuration.
+      - name: Start PostgreSQL with TLS
+        run: |
+          set -euo pipefail
+          docker run -d --name pg \
+            -v "$RUNNER_TEMP/pg-tls:/tls:ro" \
+            -v "$GITHUB_WORKSPACE/test/integration:/it:ro" \
+            -e POSTGRES_PASSWORD_FILE=/tls/admin-password \
+            --entrypoint sh "$PG_IMAGE" /it/pg-entrypoint.sh
+          # Over TCP: the temporary server initdb starts listens on the socket
+          # only, so the answer here is the real server's.
+          ready=
+          for _ in $(seq 1 60); do
+            if docker exec pg pg_isready -h 127.0.0.1 -U postgres; then ready=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then docker logs pg; echo "PostgreSQL did not become ready" >&2; exit 1; fi
+          echo "PG_IP=$(docker inspect -f '{{.NetworkSettings.IPAddress}}' pg)" >> "$GITHUB_ENV"
+
+      - name: Run the Cloud SQL backend tests
+        run: |
+          set -euo pipefail
+          export PG_HOST="$PG_IP" PG_PORT=5432 PG_ADMIN_USER=postgres
+          export PG_CA_FILE="$RUNNER_TEMP/pg-tls/ca.crt"
+          export PG_ADMIN_PASSWORD_FILE="$RUNNER_TEMP/pg-tls/admin-password"
+          go test -tags integration,cloudsql -race -count=1 -v -run 'TestCloudSQL' ./test/integration/...
+
+      - name: Show the server log
+        if: failure()
+        run: docker logs pg
+
+      - name: Remove the server
+        if: always()
+        run: docker rm -f pg
