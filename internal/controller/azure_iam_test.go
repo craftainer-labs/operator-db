@@ -312,21 +312,15 @@ func TestAzureIAMRoleNeedsEntraAdmin(t *testing.T) {
 }
 
 // Deleting a claim whose Entra role is someone else's leaves the role alone.
-func TestAzureIAMDeleteSkipsAForeignRole(t *testing.T) {
-	f := newFakeARM(t)
-	h := entraHarness(t, f)
-	rr := &RoleReconciler{h.cfg}
-	h.reconcileOK(&DatabaseReconciler{h.cfg}, h.database("orders", nil))
-	role := h.role("orders-iam", "orders", azureIAMClaim(azPrincipal))
-	h.reconcileOK(rr, role)
-	h.get(role)
-
-	h.fake.answer = iamRoleAnswer(azPrincipal, "other/role/uid", "ReadOnly")
-	h.must(env.Client.Delete(context.Background(), role))
-	h.fake.reset()
-	h.reconcileOK(rr, role)
-	h.fake.wantNot(t, "DROP ROLE", "DROP OWNED", "REASSIGN", "pgaadauth")
-	if !h.gone(role) {
-		t.Error("the claim is still there")
+func TestDeleteEntraRoleSkipsAForeignRole(t *testing.T) {
+	fake := &pgFake{answer: iamRoleAnswer(azPrincipal, "other/claim/uid", "ReadWrite")}
+	e := &roleExternal{
+		be: &backend{admin: pgclient.Admin{Open: pgclient.Opener(nil, fake.connect, pgclient.Target{})},
+			provider: cloud.ProviderAzure},
+		base: azPrincipal, id: "team/app/uid", database: "db",
 	}
+	if err := e.deleteEntraRole(context.Background()); err != nil {
+		t.Errorf("a role that is not ours: %v", err)
+	}
+	fake.wantNot(t, "DROP ROLE", "DROP OWNED", "REASSIGN", "GRANT")
 }
