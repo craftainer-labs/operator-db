@@ -291,7 +291,9 @@ func TestCloudSQLIAMRole(t *testing.T) {
 	db := newDatabase(t, admin, "it/csql/db-uid")
 	const claim = "it/csql/role-uid"
 	principal := "it-" + suffix() + "@" + csProject + ".iam"
-	t.Cleanup(func() { _ = h.f.exec(ctx, "DROP OWNED BY "+pgclient.Ident(principal)+"; DROP ROLE IF EXISTS "+pgclient.Ident(principal)) })
+	t.Cleanup(func() {
+		_ = h.f.exec(ctx, "DROP OWNED BY "+pgclient.Ident(principal)+"; DROP ROLE IF EXISTS "+pgclient.Ident(principal))
+	})
 	params := func(priv string) pgclient.RoleParams {
 		return pgclient.RoleParams{
 			Base: principal, Database: db, ConnLimit: 3, Privileges: priv,

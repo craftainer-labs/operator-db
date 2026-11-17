@@ -73,9 +73,8 @@ type DatabaseRoleSpec struct {
 // IAMSpec is the consumer's cloud identity in IAM mode.
 type IAMSpec struct {
 	// principal is the consumer's identity: on Cloud SQL the e-mail of a Google
-	// account, or of a service account (a *.iam.gserviceaccount.com address, or
-	// the form Cloud SQL shows without ".gserviceaccount.com"). The database
-	// user is named by it. Immutable.
+	// account, or of a service account without ".gserviceaccount.com"
+	// (name@project.iam). The database user is named by it. Immutable.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=320
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="iam.principal is immutable"

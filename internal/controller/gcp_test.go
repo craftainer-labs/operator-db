@@ -602,19 +602,19 @@ func TestWaitOperation(t *testing.T) {
 
 func TestValidPrincipal(t *testing.T) {
 	for p, want := range map[string]bool{
-		"app@proj-12345.iam":        true,
-		"alice@example.com":         true,
-		"a.b+c_d%e@x.y.z":           true,
-		"App@proj-12345.iam":        false,
+		"app@proj-12345.iam":                     true,
+		"alice@example.com":                      true,
+		"a.b+c_d%e@x.y.z":                        true,
+		"App@proj-12345.iam":                     false,
 		"app@proj-12345.iam.gserviceaccount.com": false,
-		"app":                       false,
-		"@x.iam":                    false,
-		"app@":                      false,
-		"app@x.iam;DROP":            false,
-		"app @x.iam":                false,
-		"":                          false,
-		strings.Repeat("a", 60) + "@b.cd": false,
-		"a@" + strings.Repeat("b", 60):   false,
+		"app":                                    false,
+		"@x.iam":                                 false,
+		"app@":                                   false,
+		"app@x.iam;DROP":                         false,
+		"app @x.iam":                             false,
+		"":                                       false,
+		strings.Repeat("a", 60) + "@b.cd":        false,
+		"a@" + strings.Repeat("b", 60):           false,
 	} {
 		if got := ValidPrincipal(p); got != want {
 			t.Errorf("ValidPrincipal(%q) = %v, want %v", p, got, want)

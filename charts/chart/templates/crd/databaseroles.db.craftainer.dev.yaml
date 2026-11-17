@@ -62,8 +62,9 @@ spec:
               authMode:
                 default: Password
                 description: |-
-                  authMode is Password (the default: a generated password) or IAM (a
-                  cloud token; refused until the IAM mode is implemented). Immutable.
+                  authMode is Password (the default: a generated password) or IAM (the
+                  consumer's cloud identity logs in with a token; no password). IAM needs a
+                  cloud server that supports it (AWS RDS, Cloud SQL). Immutable.
                 enum:
                 - Password
                 - IAM
@@ -107,6 +108,25 @@ spec:
                       rule: self == oldSelf
                 required:
                 - name
+                type: object
+              iam:
+                description: |-
+                  iam names the consumer's cloud identity. It is required on Cloud SQL
+                  with authMode IAM and refused on AWS.
+                properties:
+                  principal:
+                    description: |-
+                      principal is the consumer's identity: on Cloud SQL the e-mail of a Google
+                      account, or of a service account without ".gserviceaccount.com"
+                      (name@project.iam). The database user is named by it. Immutable.
+                    maxLength: 320
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: iam.principal is immutable
+                      rule: self == oldSelf
+                required:
+                - principal
                 type: object
               managementPolicies:
                 default:
@@ -200,6 +220,8 @@ spec:
                 || ''Update'' in self.managementPolicies'
             - message: rotationPolicy is not allowed with authMode IAM
               rule: '!has(self.authMode) || self.authMode == ''Password'' || !has(self.rotationPolicy)'
+            - message: iam is allowed only with authMode IAM
+              rule: '!has(self.iam) || (has(self.authMode) && self.authMode == ''IAM'')'
           status:
             description: status defines the observed state of DatabaseRole
             properties:
