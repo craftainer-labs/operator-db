@@ -238,8 +238,8 @@ func TestAzureProbeFailuresAreCategories(t *testing.T) {
 // entraRole is the PostgreSQL role of the Entra administrator the tests log in
 // as, with the fake's token as its password.
 const (
-	entraRole  = "operator@contoso.example"
-	entraToken = "fake-entra-token"
+	entraRole       = "operator@contoso.example"
+	entraLoginValue = "fake-entra-token"
 )
 
 // An Entra administrator logs in with the token the credential fetches for the
@@ -252,7 +252,7 @@ func TestAzureEntraAdminProbe(t *testing.T) {
 	defer cancel()
 	root := adminSession(t, h.pg.admin(func(tg *pgclient.Target) { tg.ServerName = azTLSServer }), "")
 	q := pgclient.Ident(entraRole)
-	if err := root.Exec(ctx, "CREATE ROLE "+q+" LOGIN SUPERUSER PASSWORD "+pgclient.Literal(entraToken)); err != nil {
+	if err := root.Exec(ctx, "CREATE ROLE "+q+" LOGIN SUPERUSER PASSWORD "+pgclient.Literal(entraLoginValue)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = root.Exec(context.Background(), "DROP ROLE IF EXISTS "+q) })

@@ -18,12 +18,12 @@ import (
 // The kinds satisfy the interfaces lib-operator-go's reconciler and server
 // resolver are written against.
 var (
-	_ lifecycle.Claim = (*Database)(nil)
-	_ lifecycle.Claim = (*DatabaseRole)(nil)
-	_ server.Server   = (*ClusterDatabaseServer)(nil)
-	_ server.Server   = (*DatabaseServer)(nil)
-	_ probe.Server    = (*ClusterDatabaseServer)(nil)
-	_ probe.Server    = (*DatabaseServer)(nil)
+	_ lifecycle.Claim    = (*Database)(nil)
+	_ lifecycle.Claim    = (*DatabaseRole)(nil)
+	_ server.CloudServer = (*ClusterDatabaseServer)(nil)
+	_ server.CloudServer = (*DatabaseServer)(nil)
+	_ probe.CloudServer = (*ClusterDatabaseServer)(nil)
+	_ probe.CloudServer = (*DatabaseServer)(nil)
 )
 
 func TestAddToScheme(t *testing.T) {
