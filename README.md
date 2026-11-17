@@ -193,8 +193,12 @@ keys; a `DatabaseServer` must use `Secret`). `host` is then optional and
 overrides the address the operator reads from the RDS API
 (`status.discovered`). `adminCredentialsSecretRef` is still the administrator
 password the operator runs SQL with. Claims use `authMode: Password`
-(the default); `IAM` is refused with `AuthModeUnsupported` until it is
-implemented. The operator needs `rds:DescribeDBInstances` and
+(the default) or `authMode: IAM` (immutable): in IAM mode the role is one
+login, granted `rds_iam`, with no password and no rotation, and the binding
+Secret carries `iamResourceArn`, the `rds-db:connect` ARN the workload's role
+must be allowed, so the workload builds a 15-minute token for `username` with
+the AWS SDK. `IAM` on a server that is not on AWS is refused with
+`AuthModeUnsupported`. The operator needs `rds:DescribeDBInstances` and
 `rds:DescribeDBClusters`. `endpointOverride` (cluster servers only, and only
 with `EGRESS_MODE=allow-private`) is for emulators. See
 [ADR 0005](docs/adrs/0005-cloud-backends.md) and
@@ -218,6 +222,11 @@ keys:
 | `sslmode` | The server's `spec.sslMode`: `verify-full` (the default), `verify-ca` or `require`. The operator itself verifies the chain and host name in all three, but the Secret carries the value as written: a client that is given `require` or `verify-ca` verifies less than the operator does, so set `verify-full` on the server for clients that must verify. |
 | `sslrootcert` | The PEM CA bundle that the server's `spec.tls.caBundle` refers to, for the client to pin. The key is present and empty when the server has no bundle. |
 | `uri` | A complete `postgresql://user:password@host:port/database?sslmode=...` URI built from the keys above. It carries the password, like the Secret does. It has no CA: pass `sslrootcert` to the client separately. |
+
+On a cloud server the Secret adds `cloud` (`aws`), `authMode` (`Password` or `IAM`)
+and `region`. In `IAM` mode it has **no `password` and no `uri`**, its `username` is
+the one login role (it never changes), and it adds `iamResourceArn`
+(`arn:aws:rds-db:<region>:<account>:dbuser:<resourceId>/<username>`).
 
 ## Install
 

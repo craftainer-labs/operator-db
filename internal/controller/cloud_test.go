@@ -386,14 +386,6 @@ func TestCloudServerBackendAndBinding(t *testing.T) {
 		data["authMode"] != "Password" || data["region"] != "eu-west-1" || data["password"] == "" {
 		t.Errorf("binding = %v", data)
 	}
-
-	// IAM is not implemented: the claim is refused with its reason and creates nothing.
-	h.fake.reset()
-	iam := h.role("orders-iam", "orders", func(r *dbv1alpha1.DatabaseRole) { r.Spec.AuthMode = dbv1alpha1.AuthModeIAM })
-	if err = h.reconcile(rr, iam); err == nil || !strings.Contains(err.Error(), ReasonAuthModeUnsupported) {
-		t.Errorf("IAM: %v", err)
-	}
-	h.fake.wantNot(t, "CREATE ROLE")
 }
 
 type codedErr struct{ code string }

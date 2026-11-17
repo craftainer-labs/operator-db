@@ -31,6 +31,10 @@ and refused without TLS.
   `.github/workflows/integration.yml` with `-tags integration,rds`. moto does
   not enforce IAM, so credentials and RDS IAM tokens are untested here
   ([NFR-0005](../../docs/nfrs/NFR-0005-cloud-credentials-and-egress.md)).
+- `rds_iam_test.go` (same tags) — the IAM mode (NKdb-1b): the login role with
+  `rds_iam` and no password, its privileges, the name-collision refusal, and the
+  `iamResourceArn` built from what the probe discovers in moto. PostgreSQL is not
+  RDS, so the test creates the `rds_iam` role itself; no token is validated.
 
 ## Running
 

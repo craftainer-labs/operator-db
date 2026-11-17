@@ -84,9 +84,11 @@ type backend struct {
 	// the address discovered from the cloud.
 	host string
 	port int32
-	// cloud is set for a cloud server, with the region it was discovered in.
-	cloud  bool
-	region string
+	// cloud is set for a cloud server, with the region it was discovered in and
+	// what the probe discovered (status.discovered).
+	cloud      bool
+	region     string
+	discovered map[string]string
 }
 
 // backend resolves ref for a claim in ns: the connection settings through
@@ -131,7 +133,22 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 		}
 	}
 	return &backend{admin: pgclient.Admin{Open: pgclient.Opener(pool, c.Connect, target)}, pool: pool, recorder: c.Recorder, spec: spec, conn: conn,
-		host: target.Host, port: int32(target.Port), cloud: obj.cloud, region: firstNonEmpty(obj.region, obj.discovered[dbv1alpha1.DiscoveredRegion])}, nil
+		host: target.Host, port: int32(target.Port), cloud: obj.cloud, region: firstNonEmpty(obj.region, obj.discovered[dbv1alpha1.DiscoveredRegion]),
+		discovered: obj.discovered}, nil
+}
+
+// IAMResourceARN is the iamResourceArn of an IAM-mode login named user: the ARN
+// its consumer's role must be allowed to rds-db:connect to,
+// arn:aws:rds-db:<region>:<account>:dbuser:<resourceId>/<user>. The partition
+// is aws (no sovereign clouds in v1alpha1). The account and the resource id are
+// what the probe discovered (status.discovered); without them, or without the
+// region, it is ErrIAMTargetUnknown.
+func IAMResourceARN(region string, discovered map[string]string, user string) (string, error) {
+	account, id := discovered[dbv1alpha1.DiscoveredAccountID], discovered[dbv1alpha1.DiscoveredResourceID]
+	if region == "" || account == "" || id == "" {
+		return "", ErrIAMTargetUnknown
+	}
+	return "arn:aws:rds-db:" + region + ":" + account + ":dbuser:" + id + "/" + user, nil
 }
 
 // adminTarget is the connection to a server's admin database: its host, port

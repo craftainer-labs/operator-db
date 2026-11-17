@@ -8,7 +8,6 @@ require (
 	cloud.google.com/go/cloudsqlconn v1.27.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.15.0
 	github.com/aws/aws-sdk-go-v2 v1.48.0
-	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.7.12
 	github.com/aws/aws-sdk-go-v2/service/rds v1.133.0
 	github.com/craftainer-labs/lib-operator-go v0.5.0
 	github.com/jackc/pgx/v5 v5.12.0
@@ -39,6 +38,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.19 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.21.1 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.9 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.7.12 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.12 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.12 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.12 // indirect

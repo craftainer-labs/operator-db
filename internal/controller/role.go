@@ -61,18 +61,47 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if name != "" {
 			x.database = name
 		}
+		ext = x
+		iam := role.Spec.AuthMode == dbv1alpha1.AuthModeIAM
+		if iam {
+			ext = iamRoleExternal{x}
+		}
 		if role.DeletionTimestamp.IsZero() {
 			x.pre = derr
-			if role.Spec.AuthMode == dbv1alpha1.AuthModeIAM {
-				x.pre = ErrAuthModeUnsupported
-				if r.Recorder != nil {
-					r.Recorder.Eventf(&role, nil, corev1.EventTypeWarning, ReasonAuthModeUnsupported, "Reconcile", "%s", ErrAuthModeUnsupported.Error())
-				}
+			if iam {
+				x.pre = r.checkIAM(&role, x, derr)
 			}
 		}
-		ext = x
 	}
 	return lifecycle.Reconcile(ctx, r.Client, &role, role.Spec, ext, opts)
+}
+
+// checkIAM is the precondition of an IAM-mode claim, in this order: the server
+// must be a cloud one (AuthModeUnsupported otherwise, whatever else is wrong),
+// the rotate annotation is answered with RotationNotApplicable, the Database
+// must be usable (derr) and the ARN of the login must be known. It records the
+// ARN on x.
+func (r *RoleReconciler) checkIAM(role *dbv1alpha1.DatabaseRole, x *roleExternal, derr error) error {
+	if !x.be.cloud {
+		r.warn(role, ReasonAuthModeUnsupported, ErrAuthModeUnsupported.Error())
+		return ErrAuthModeUnsupported
+	}
+	if role.GetAnnotations()[lifecycle.AnnotationRotate] != "" {
+		r.warn(role, ReasonRotationNotApplicable, "an IAM login has no credential to rotate: the consumer's identity authenticates with a short-lived token")
+	}
+	if derr != nil {
+		return derr
+	}
+	var err error
+	x.arn, err = IAMResourceARN(x.be.region, x.be.discovered, x.base)
+	return err
+}
+
+// warn records a Warning Event on a claim, when there is a recorder.
+func (r *RoleReconciler) warn(role *dbv1alpha1.DatabaseRole, reason, text string) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(role, nil, corev1.EventTypeWarning, reason, "Reconcile", "%s", text)
+	}
 }
 
 // options are the lifecycle options of the controller; resolveErr is the error
@@ -155,6 +184,8 @@ type roleExternal struct {
 	id         string
 	privileges string
 	limit      int32
+	// arn is the iamResourceArn of an IAM-mode claim's login.
+	arn string
 	// pre is a precondition failure (the Database is not usable). Observe
 	// reports it, and Reconcile calls nothing else when Observe fails.
 	pre error
@@ -177,6 +208,12 @@ func newRoleExternal(be *backend, claim *dbv1alpha1.DatabaseRole) *roleExternal 
 		be: be, claim: claim, base: base, database: pgclient.DatabaseName(claim.Namespace, claim.Spec.DatabaseRef.Name),
 		id: claimID(claim), privileges: priv, limit: connLimit(claim.Spec.ConnectionLimit),
 	}
+}
+
+// namedRole is a role of a claim's set, with the name it has on the server.
+type namedRole struct {
+	name string
+	info pgclient.RoleInfo
 }
 
 func (e *roleExternal) marker(active string) pgclient.Marker {
@@ -210,6 +247,14 @@ func (e *roleExternal) foreign(refusal error) error {
 // released without a drop. A login of ours is dropped even when the owner role
 // next to it is foreign, because it would be a live credential left behind.
 func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec) (lifecycle.Observation[pgclient.RoleState], error) {
+	return e.observe(ctx, false)
+}
+
+// observe is Observe of both modes. An IAM-mode claim has the one login role
+// named base, and neither the _a nor the _b login: it is up to date when that
+// role can log in, is a member of rds_iam, has the wanted connection limit and
+// carries this claim's marker with its privileges.
+func (e *roleExternal) observe(ctx context.Context, iam bool) (lifecycle.Observation[pgclient.RoleState], error) {
 	none := lifecycle.Observation[pgclient.RoleState]{}
 	// Reconcile adds the finalizer with a patch that replaces the claim with
 	// the server's copy, which loses a name set before it; set it again here.
@@ -224,10 +269,11 @@ func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpe
 	// A role is created together with its marker, so one that exists without
 	// ours is not ours, whichever of the three it is.
 	ours := false
-	for _, r := range []struct {
-		name string
-		info pgclient.RoleInfo
-	}{{e.base, st.Base}, {pgclient.LoginName(e.base, pgclient.GenA), st.A}, {pgclient.LoginName(e.base, pgclient.GenB), st.B}} {
+	roles := []namedRole{{e.base, st.Base}}
+	if !iam {
+		roles = append(roles, namedRole{pgclient.LoginName(e.base, pgclient.GenA), st.A}, namedRole{pgclient.LoginName(e.base, pgclient.GenB), st.B})
+	}
+	for _, r := range roles {
 		if !r.info.Exists {
 			continue
 		}
@@ -252,9 +298,14 @@ func (e *roleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpe
 	if st.Marker.Claim == e.id && e.claim.GetExternalID() == "" {
 		e.claim.SetExternalID(createIssued)
 	}
-	upToDate := st.Marker.Claim == e.id && st.Marker.Privileges == e.privileges && !st.Base.Login &&
-		st.A.Exists && st.B.Exists && st.A.ConnLimit == e.limit && st.B.ConnLimit == e.limit &&
-		st.Login(activeOf(st.Marker)).Login
+	upToDate := st.Marker.Claim == e.id && st.Marker.Privileges == e.privileges
+	if iam {
+		upToDate = upToDate && st.Base.Login && st.Base.RDSIAM && st.Base.ConnLimit == e.limit
+	} else {
+		upToDate = upToDate && !st.Base.Login &&
+			st.A.Exists && st.B.Exists && st.A.ConnLimit == e.limit && st.B.ConnLimit == e.limit &&
+			st.Login(activeOf(st.Marker)).Login
+	}
 	return lifecycle.Observation[pgclient.RoleState]{Exists: true, UpToDate: upToDate, Current: st}, nil
 }
 
@@ -279,11 +330,17 @@ func (e *roleExternal) issue(ctx context.Context, active string) (binding.Data, 
 // crash after it is recognised; a claim deleted without the record is released
 // without the server being contacted.
 func (e *roleExternal) Create(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec) (binding.Data, error) {
+	return e.create(ctx, func(ctx context.Context) (binding.Data, error) { return e.issue(ctx, pgclient.GenA) })
+}
+
+// create records the create and runs issue, which creates the roles of the
+// claim's mode.
+func (e *roleExternal) create(ctx context.Context, issue func(context.Context) (binding.Data, error)) (binding.Data, error) {
 	e.claim.SetExternalID(createIssued)
 	if err := e.persist(ctx); err != nil {
 		return nil, err
 	}
-	data, err := e.issue(ctx, pgclient.GenA)
+	data, err := issue(ctx)
 	if !errors.Is(err, pgclient.ErrNotOwned) {
 		return data, err
 	}
@@ -364,19 +421,26 @@ const (
 		"the admin role needs pg_signal_backend"
 )
 
+// endpoint is where and how a login connects: the host, the port and the
+// sslmode of the binding.
+func (e *roleExternal) endpoint() (host string, port int32, sslmode string) {
+	host, port = e.be.host, e.be.port
+	if port == 0 {
+		port = dbv1alpha1.DefaultPort
+	}
+	sslmode = string(e.be.spec.SSLMode)
+	if sslmode == "" {
+		sslmode = string(dbv1alpha1.SSLModeVerifyFull)
+	}
+	return host, port, sslmode
+}
+
 // data is the postgresql binding of one login (ADR 0002, section 7). The CA is
 // the server's bundle; the uri carries the password, like the Secret does.
 func (e *roleExternal) data(gen, password string) binding.Data {
 	user := pgclient.LoginName(e.base, gen)
-	host, port := e.be.host, e.be.port
-	if port == 0 {
-		port = dbv1alpha1.DefaultPort
-	}
+	host, port, sslmode := e.endpoint()
 	hostPort := net.JoinHostPort(host, strconv.Itoa(int(port)))
-	sslmode := string(e.be.spec.SSLMode)
-	if sslmode == "" {
-		sslmode = string(dbv1alpha1.SSLModeVerifyFull)
-	}
 	uri := url.URL{
 		Scheme: "postgresql", User: url.UserPassword(user, password), Host: hostPort,
 		Path: "/" + e.database, RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
@@ -398,6 +462,67 @@ func (e *roleExternal) data(gen, password string) binding.Data {
 		d["region"] = []byte(e.be.region)
 	}
 	return d
+}
+
+// iamRoleExternal is the lifecycle.External of an IAM-mode DatabaseRole (ADR
+// 0005): one login role, authenticated by an IAM token the consumer builds.
+// It is deliberately not a lifecycle.Rotator, and does not embed the
+// roleExternal that is one: nothing is rotated, and status.rotation stays
+// empty. The rotate annotation is answered by the controller.
+type iamRoleExternal struct{ x *roleExternal }
+
+// Observe implements lifecycle.External.
+func (e iamRoleExternal) Observe(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec) (lifecycle.Observation[pgclient.RoleState], error) {
+	return e.x.observe(ctx, true)
+}
+
+// Create implements lifecycle.External, with the same record of the create
+// as a Password-mode claim.
+func (e iamRoleExternal) Create(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec) (binding.Data, error) {
+	return e.x.create(ctx, e.x.issueIAM)
+}
+
+// Update implements lifecycle.External. It applies the role again (privileges
+// and connection limit) and returns the same binding data.
+func (e iamRoleExternal) Update(ctx context.Context, _ dbv1alpha1.DatabaseRoleSpec, _ pgclient.RoleState) (binding.Data, error) {
+	return e.x.issueIAM(ctx)
+}
+
+// Delete implements lifecycle.External: the role is dropped as in Password
+// mode, when it is the claim's.
+func (e iamRoleExternal) Delete(ctx context.Context, cur pgclient.RoleState) error {
+	return e.x.Delete(ctx, cur)
+}
+
+// issueIAM applies the IAM-mode login role and returns the binding data.
+func (e *roleExternal) issueIAM(ctx context.Context) (binding.Data, error) {
+	err := e.be.admin.ApplyIAMRole(ctx, pgclient.RoleParams{
+		Base: e.base, Database: e.database, Marker: e.marker(""), ConnLimit: e.limit, Privileges: e.privileges,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.iamData(), nil
+}
+
+// iamData is the binding of an IAM-mode login (docs/crd-drafts.md, "db x
+// cloud"): no password and no uri, which would carry one. The consumer builds
+// a token for username with the AWS SDK and needs the region and the ARN its
+// role may connect to.
+func (e *roleExternal) iamData() binding.Data {
+	host, port, sslmode := e.endpoint()
+	return binding.Data{
+		"host":           []byte(host),
+		"port":           []byte(strconv.Itoa(int(port))),
+		"database":       []byte(e.database),
+		"username":       []byte(e.base),
+		"sslmode":        []byte(sslmode),
+		"sslrootcert":    e.be.conn.CABundle,
+		"cloud":          []byte("aws"),
+		"authMode":       []byte(dbv1alpha1.AuthModeIAM),
+		"region":         []byte(e.be.region),
+		"iamResourceArn": []byte(e.arn),
+	}
 }
 
 var _ lifecycle.Rotator[dbv1alpha1.DatabaseRoleSpec, pgclient.RoleState] = (*roleExternal)(nil)
