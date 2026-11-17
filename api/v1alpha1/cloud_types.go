@@ -102,6 +102,7 @@ type AzureTarget struct {
 // AzureDatabase is provider.azure of a namespaced server (no endpointOverride).
 // The subscription and the resource group are needed to address the server.
 // +kubebuilder:validation:XValidation:rule="has(self.subscriptionID) && has(self.resourceGroup)",message="subscriptionID and resourceGroup are required for a flexible server"
+// +kubebuilder:validation:XValidation:rule="!has(self.resourceGroup) || !self.resourceGroup.endsWith('.')",message="resourceGroup must not end with a period (this also rules out . and ..)"
 type AzureDatabase struct {
 	cloud.AzureBlock `json:",inline"`
 	AzureTarget      `json:",inline"`
@@ -109,6 +110,7 @@ type AzureDatabase struct {
 
 // ClusterAzureDatabase is provider.azure of a cluster server.
 // +kubebuilder:validation:XValidation:rule="has(self.subscriptionID) && has(self.resourceGroup)",message="subscriptionID and resourceGroup are required for a flexible server"
+// +kubebuilder:validation:XValidation:rule="!has(self.resourceGroup) || !self.resourceGroup.endsWith('.')",message="resourceGroup must not end with a period (this also rules out . and ..)"
 type ClusterAzureDatabase struct {
 	cloud.AzureClusterBlock `json:",inline"`
 	AzureTarget             `json:",inline"`

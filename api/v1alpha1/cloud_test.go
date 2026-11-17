@@ -108,6 +108,14 @@ func TestAzureProviderRules(t *testing.T) {
 		mutate(s.Spec.Provider.Azure)
 		invalid(t, s, "")
 	}
+	for _, g := range []string{"..", ".", "rg."} {
+		dots := azureNamespaced("az-ns-dots")
+		dots.Spec.Provider.Azure.ResourceGroup = g
+		invalid(t, dots, "resourceGroup must not end with a period")
+		dotsC := azureCluster("az-dots")
+		dotsC.Spec.Provider.Azure.ResourceGroup = g
+		invalid(t, dotsC, "resourceGroup must not end with a period")
+	}
 	noGroupNS := azureNamespaced("az-ns-no-group")
 	noGroupNS.Spec.Provider.Azure.ResourceGroup = ""
 	invalid(t, noGroupNS, "subscriptionID and resourceGroup are required")

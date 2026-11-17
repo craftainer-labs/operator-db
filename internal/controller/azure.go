@@ -77,14 +77,19 @@ func armErr(err error) error {
 	var ne net.Error
 	var af *azidentity.AuthenticationFailedError
 	st := armStatus(err)
-	if errors.As(err, &af) && af.RawResponse != nil {
+	isAuth := errors.As(err, &af)
+	if isAuth && af.RawResponse != nil {
 		st = af.RawResponse.StatusCode
 	}
 	switch {
-	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) ||
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.As(err, &ne) ||
 		st == http.StatusTooManyRequests || st == http.StatusRequestTimeout || st >= 500:
 		return transientErr(ReasonCloudError, "the Azure Resource Manager call failed")
-	case af != nil:
+	case isAuth && af.RawResponse == nil:
+		// The authority gave no answer (a blocked or failed connection, a TLS
+		// failure): that says nothing about the credential, so it is retried.
+		return transientErr(ReasonCloudError, "the Entra authority could not be reached")
+	case isAuth:
 		return cloudErr(ReasonCredentialsUnavailable, "the Azure credentials were refused")
 	}
 	return cloudErr(ReasonCloudError, "the Azure Resource Manager call failed")
@@ -130,7 +135,7 @@ func (c Config) discoverAzure(ctx context.Context, cs *cloudSpec, conn server.Co
 // describeAzure reads the flexible server's host name, region and resource id.
 // The host name is what the server's certificate carries, and the admin
 // password is sent to it, so only a plain DNS name is accepted. A server that is
-// not Ready (stopped, starting, dropping) has no usable address yet.
+// not Ready (stopped, starting, updating) has no usable address for now: it is a transient CloudError.
 func describeAzure(ctx context.Context, api ARMAPI, cs *cloudSpec) (map[string]string, error) {
 	srv, err := api.GetServer(ctx, cs.azure.ResourceGroup, cs.azureTarget.ServerName)
 	switch {
@@ -144,7 +149,9 @@ func describeAzure(ctx context.Context, api ARMAPI, cs *cloudSpec) (map[string]s
 		return nil, cloudErr(ReasonCloudError, "the flexible server has no host name yet")
 	}
 	if p.State != nil && *p.State != armpostgresqlflexibleservers.ServerStateReady {
-		return nil, cloudErr(ReasonCloudError, "the flexible server is not ready")
+		// Starting, updating or stopped: the address comes back by itself, so the
+		// last one is kept through it.
+		return nil, transientErr(ReasonCloudError, "the flexible server is not ready")
 	}
 	host := *p.FullyQualifiedDomainName
 	if !validEndpoint(host) {

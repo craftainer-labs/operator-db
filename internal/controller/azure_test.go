@@ -244,7 +244,8 @@ func TestDescribeAzure(t *testing.T) {
 		"bad name":        {serverWith(azFQDN, "a_b.example"), ReasonCloudError},
 	} {
 		f.server = tc.body
-		if _, err := h.cfg.discover(ctx, cs, server.Connection{}); reasonOf(t, err) != tc.reason {
+		_, err := h.cfg.discover(ctx, cs, server.Connection{})
+		if reasonOf(t, err) != tc.reason || isTransient(err) != (name == "not ready") {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -319,9 +320,17 @@ func TestDescribeAzureFailuresAreCategories(t *testing.T) {
 	if e := armErr(refused); reasonOf(t, e) != ReasonCredentialsUnavailable || isTransient(e) {
 		t.Error("a refused credential")
 	}
-	// An authentication failure with no response is still a refused credential.
-	if e := armErr(&azidentity.AuthenticationFailedError{}); reasonOf(t, e) != ReasonCredentialsUnavailable {
+	// An authentication failure with no response says nothing about the
+	// credential (the authority was not reached): it is retried. A cancelled
+	// context is transient too, and a server error of the authority.
+	if e := armErr(&azidentity.AuthenticationFailedError{}); reasonOf(t, e) != ReasonCloudError || !isTransient(e) {
 		t.Error("an authentication error without a response")
+	}
+	if e := armErr(context.Canceled); !isTransient(e) {
+		t.Error("a cancelled context is not transient")
+	}
+	if e := armErr(&azidentity.AuthenticationFailedError{RawResponse: &http.Response{StatusCode: http.StatusBadGateway}}); !isTransient(e) {
+		t.Error("an authority server error is not transient")
 	}
 }
 

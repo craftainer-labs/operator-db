@@ -256,14 +256,19 @@ no `discovered` field, and its probe reports only conditions it chooses.
   endpoint, which is what an emulator that serves both needs. Errors are
   categories: the SDK text, the subscription, the resource group and the
   server name never reach a condition, Event or log from this code. A
-  credential the authority refuses is `CredentialsUnavailable`.
+  credential the authority refuses is `CredentialsUnavailable`; an authority
+  that cannot be reached is transient. `endpointOverride` is for emulators: the
+  Entra token minted for the public Resource Manager audience is sent to the
+  override host, which only a cluster administrator in `allow-private` mode can
+  set. `resourceGroup` must not end with a period, which also rules out `.` and
+  `..` in the request path.
 - **Discovery.** The probe calls `servers.get` of Resource Manager
   (`armpostgresqlflexibleservers/v6`, resource provider registration off: the
   operator only reads) and records `endpoint` (the server's
   `fullyQualifiedDomainName`), `port` (5432), `region` (the server's location)
   and `resourceId` (the ARM id) in `status.discovered`. The host name must be a
   plain DNS name and the server's state `Ready` (a stopped or starting server
-  has no usable address: `CloudError`). A missing server is `TargetNotFound`;
+  has no usable address for now: a transient `CloudError`). A missing server is `TargetNotFound`;
   throttling, timeouts and 5xx answers are transient (the last address is kept).
 - **Admin connection and roles.** The password Secret of
   `adminCredentialsSecretRef`, over the same verified TLS as every other server,
