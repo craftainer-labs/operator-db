@@ -226,6 +226,9 @@ spec:
                     - message: subscriptionID and resourceGroup are required for a
                         flexible server
                       rule: has(self.subscriptionID) && has(self.resourceGroup)
+                    - message: resourceGroup must not end with a period (this also
+                        rules out . and ..)
+                      rule: '!has(self.resourceGroup) || !self.resourceGroup.endsWith(''.'')'
                   gcp:
                     description: gcp holds the Google Cloud settings (a Cloud SQL
                       instance).
