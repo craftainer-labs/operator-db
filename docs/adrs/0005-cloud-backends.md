@@ -268,7 +268,8 @@ no `discovered` field, and its probe reports only conditions it chooses.
   `fullyQualifiedDomainName`), `port` (5432), `region` (the server's location)
   and `resourceId` (the ARM id) in `status.discovered`. The host name must be a
   plain DNS name and the server's state `Ready` (a stopped or starting server
-  has no usable address for now: a transient `CloudError`). A missing server is `TargetNotFound`;
+  has no usable address for now: a `CloudError`, transient only while it is
+  Starting or Updating). A missing server is `TargetNotFound`;
   throttling, timeouts and 5xx answers are transient (the last address is kept).
 - **Admin connection and roles.** The password Secret of
   `adminCredentialsSecretRef`, over the same verified TLS as every other server,

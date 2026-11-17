@@ -236,16 +236,21 @@ func TestDescribeAzure(t *testing.T) {
 	}
 
 	// A server that is not usable yet, or whose answer is not what is expected.
-	for name, tc := range map[string]struct{ body, reason string }{
-		"not ready":       {serverWith(`"state": "Ready"`, `"state": "Stopped"`), ReasonCloudError},
-		"no host name":    {serverWith(`"fullyQualifiedDomainName": "`+azFQDN+`"`, `"fullyQualifiedDomainName": ""`), ReasonCloudError},
-		"no properties":   {`{"id":"x"}`, ReasonCloudError},
-		"address as name": {serverWith(azFQDN, "10.0.0.5"), ReasonCloudError},
-		"bad name":        {serverWith(azFQDN, "a_b.example"), ReasonCloudError},
+	for name, tc := range map[string]struct {
+		body, reason string
+		transient    bool
+	}{
+		"starting":        {serverWith(`"state": "Ready"`, `"state": "Starting"`), ReasonCloudError, true},
+		"updating":        {serverWith(`"state": "Ready"`, `"state": "Updating"`), ReasonCloudError, true},
+		"stopped":         {serverWith(`"state": "Ready"`, `"state": "Stopped"`), ReasonCloudError, false},
+		"no host name":    {serverWith(`"fullyQualifiedDomainName": "`+azFQDN+`"`, `"fullyQualifiedDomainName": ""`), ReasonCloudError, false},
+		"no properties":   {`{"id":"x"}`, ReasonCloudError, false},
+		"address as name": {serverWith(azFQDN, "10.0.0.5"), ReasonCloudError, false},
+		"bad name":        {serverWith(azFQDN, "a_b.example"), ReasonCloudError, false},
 	} {
 		f.server = tc.body
 		_, err := h.cfg.discover(ctx, cs, server.Connection{})
-		if reasonOf(t, err) != tc.reason || isTransient(err) != (name == "not ready") {
+		if reasonOf(t, err) != tc.reason || isTransient(err) != tc.transient {
 			t.Errorf("%s: %v", name, err)
 		}
 	}

@@ -135,7 +135,7 @@ func (c Config) discoverAzure(ctx context.Context, cs *cloudSpec, conn server.Co
 // describeAzure reads the flexible server's host name, region and resource id.
 // The host name is what the server's certificate carries, and the admin
 // password is sent to it, so only a plain DNS name is accepted. A server that is
-// not Ready (stopped, starting, updating) has no usable address for now: it is a transient CloudError.
+// not Ready (stopped, starting, updating) has no usable address for now: a CloudError, transient while it is Starting or Updating.
 func describeAzure(ctx context.Context, api ARMAPI, cs *cloudSpec) (map[string]string, error) {
 	srv, err := api.GetServer(ctx, cs.azure.ResourceGroup, cs.azureTarget.ServerName)
 	switch {
@@ -149,9 +149,12 @@ func describeAzure(ctx context.Context, api ARMAPI, cs *cloudSpec) (map[string]s
 		return nil, cloudErr(ReasonCloudError, "the flexible server has no host name yet")
 	}
 	if p.State != nil && *p.State != armpostgresqlflexibleservers.ServerStateReady {
-		// Starting, updating or stopped: the address comes back by itself, so the
-		// last one is kept through it.
-		return nil, transientErr(ReasonCloudError, "the flexible server is not ready")
+		// Starting and updating pass by themselves, so the last address is kept
+		// through them; a stopped, disabled or dropping server is down until
+		// somebody acts, and drops it.
+		st := *p.State
+		transient := st == armpostgresqlflexibleservers.ServerStateStarting || st == armpostgresqlflexibleservers.ServerStateUpdating
+		return nil, &CloudError{Reason: ReasonCloudError, msg: "the flexible server is not ready", transient: transient}
 	}
 	host := *p.FullyQualifiedDomainName
 	if !validEndpoint(host) {
