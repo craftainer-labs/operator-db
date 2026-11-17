@@ -760,3 +760,27 @@ func TestDropCloudSQLIAMRole(t *testing.T) {
 		t.Errorf("remove failure: %v", err)
 	}
 }
+
+// The errors of the Cloud SQL IAM paths do not carry the principal, which
+// PostgreSQL's messages name, and still unwrap to their cause.
+func TestCloudSQLIAMErrorsDoNotCarryThePrincipal(t *testing.T) {
+	ctx := context.Background()
+	const base = "alice@corp.example"
+	cause := fmt.Errorf(`role "%s" does not exist`, base)
+	p := RoleParams{Base: base, Database: "db", Marker: Marker{Claim: "c"}, ConnLimit: -1, Privileges: ReadWrite}
+	insert := func(context.Context) error { return nil }
+	f := &fakePG{failOn: "ON SCHEMA public", failErr: cause}
+	err := f.admin().ApplyCloudSQLIAMRole(ctx, p, insert)
+	if !errors.Is(err, cause) || strings.Contains(err.Error(), base) {
+		t.Errorf("apply: %v", err)
+	}
+	f = &fakePG{rows: iamRoleRows(base, markerPrefix+"c"), failOn: "REASSIGN OWNED", failErr: cause}
+	_, err = f.admin().DropCloudSQLIAMRole(ctx, base, "c", "db", insert)
+	if !errors.Is(err, cause) || strings.Contains(err.Error(), base) {
+		t.Errorf("drop: %v", err)
+	}
+	f = &fakePG{rows: iamRoleRows(base, markerPrefix+"c"), failOn: "GRANT ", failErr: cause}
+	if _, err = f.admin().DropCloudSQLIAMRole(ctx, base, "c", "db", insert); err != nil {
+		t.Errorf("a refused membership grant failed the drop: %v", err)
+	}
+}

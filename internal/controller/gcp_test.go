@@ -359,6 +359,14 @@ func TestDescribeCloudSQL(t *testing.T) {
 		t.Errorf("private only: %v, %v", d, err)
 	}
 
+	// An IPv4-mapped address is used as the IPv4 address.
+	f.instance = instanceWith(t, func(m map[string]any) {
+		m["ipAddresses"] = []any{map[string]any{"type": "PRIMARY", "ipAddress": "::ffff:203.0.113.5"}}
+	})
+	if d, err = describeCloudSQL(ctx, api, cs, false); err != nil || d["endpoint"] != "203.0.113.5" {
+		t.Errorf("mapped: %v, %v", d, err)
+	}
+
 	// An address that is not a routable unicast one is never used.
 	for _, ip := range []string{"127.0.0.1", "0.0.0.0", "169.254.169.254", "224.0.0.1", "::ffff:127.0.0.1", "not an ip", ""} {
 		f.instance = instanceWith(t, func(m map[string]any) {

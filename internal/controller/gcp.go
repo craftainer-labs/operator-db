@@ -220,7 +220,9 @@ func pickIP(ips []*sqladmin.IpMapping, allowPrivate bool) string {
 	var private, public string
 	for _, m := range ips {
 		a, err := netip.ParseAddr(m.IpAddress)
-		a = a.Unmap()
+		if err == nil {
+			a = a.Unmap()
+		}
 		if err != nil || a.IsUnspecified() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() {
 			continue
 		}
