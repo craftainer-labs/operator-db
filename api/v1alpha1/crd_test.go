@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 )
 
 // These tests install the generated CRDs into envtest's kube-apiserver and
@@ -311,4 +312,63 @@ func TestDatabaseRoleDefaultsAndRules(t *testing.T) {
 	tooShort := roleObj("short-interval")
 	tooShort.Spec.RotationPolicy = &common.RotationPolicy{Interval: &short}
 	invalid(t, tooShort, "interval must be between 1h and 8760h")
+}
+
+// The provider block itself, not only its type, is fixed for the server's
+// lifetime: claims already point at objects in the cloud it names, or at none.
+func TestProviderBlockCannotBeAddedOrRemoved(t *testing.T) {
+	g := NewWithT(t)
+	const want = "provider cannot be added or removed"
+	refused := func(obj client.Object) {
+		t.Helper()
+		err := k8sClient.Update(ctx, obj)
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring(want))
+	}
+	nsProvider := func() *Provider {
+		return &Provider{Type: cloud.ProviderAWS, AWS: &AWSDatabase{
+			AWSBlock:  cloud.AWSBlock{Region: "eu-west-1"},
+			AWSTarget: AWSTarget{DBInstanceIdentifier: "orders"},
+		}}
+	}
+	clProvider := func() *ClusterProvider {
+		return &ClusterProvider{Type: cloud.ProviderAWS, AWS: &ClusterAWSDatabase{
+			AWSClusterBlock: cloud.AWSClusterBlock{AWSBlock: cloud.AWSBlock{Region: "eu-west-1"}},
+			AWSTarget:       AWSTarget{DBInstanceIdentifier: "orders"},
+		}}
+	}
+	nsCreds := func() *cloud.NamespacedCredentials {
+		return &cloud.NamespacedCredentials{Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "aws"}}
+	}
+
+	// Self-hosted to cloud: adding the block is refused.
+	self := serverObj("provider-add")
+	g.Expect(k8sClient.Create(ctx, self)).To(Succeed())
+	self.Spec.Provider = nsProvider()
+	self.Spec.Credentials = nsCreds()
+	refused(self)
+
+	cluster := clusterServerObj("provider-cluster-add")
+	g.Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+	cluster.Spec.Provider = clProvider()
+	refused(cluster)
+
+	// Cloud to self-hosted: removing the block is refused.
+	cloudNS := serverObj("provider-remove")
+	cloudNS.Spec.Host = ""
+	cloudNS.Spec.Provider = nsProvider()
+	cloudNS.Spec.Credentials = nsCreds()
+	g.Expect(k8sClient.Create(ctx, cloudNS)).To(Succeed())
+	cloudNS.Spec.Provider = nil
+	cloudNS.Spec.Credentials = nil
+	cloudNS.Spec.Host = "pg.example.svc"
+	refused(cloudNS)
+
+	cloudCl := clusterServerObj("provider-cluster-remove")
+	cloudCl.Spec.Host = ""
+	cloudCl.Spec.Provider = clProvider()
+	g.Expect(k8sClient.Create(ctx, cloudCl)).To(Succeed())
+	cloudCl.Spec.Provider = nil
+	cloudCl.Spec.Host = "pg.example.svc"
+	refused(cloudCl)
 }

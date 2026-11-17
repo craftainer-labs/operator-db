@@ -489,6 +489,9 @@ spec:
                 ''Azure'']'
             - message: credentials is allowed only with provider
               rule: '!has(self.credentials) || has(self.provider)'
+            - message: 'provider cannot be added or removed: a server is self-hosted
+                or cloud for its lifetime'
+              rule: has(self.provider) == has(oldSelf.provider)
           status:
             description: status defines the observed state of ClusterDatabaseServer
             properties:

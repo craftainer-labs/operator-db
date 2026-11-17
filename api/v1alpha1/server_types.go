@@ -103,6 +103,7 @@ type PostgreSQL struct {
 // +kubebuilder:validation:XValidation:rule="has(self.provider) || (has(self.host) && size(self.host) > 0)",message="host is required without provider"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type in ['AWS', 'GCP', 'Azure']",message="only provider.type AWS, GCP and Azure are supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
+// +kubebuilder:validation:XValidation:rule="has(self.provider) == has(oldSelf.provider)",message="provider cannot be added or removed: a server is self-hosted or cloud for its lifetime"
 type ClusterDatabaseServerSpec struct {
 	common.CloudServerCommon `json:",inline"`
 	PostgreSQL               `json:",inline"`
@@ -139,6 +140,7 @@ type ClusterDatabaseServerSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type in ['AWS', 'GCP', 'Azure']",message="only provider.type AWS, GCP and Azure are supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || has(self.credentials)",message="a namespaced server with a provider must set credentials with source Secret: it cannot use WorkloadIdentity"
+// +kubebuilder:validation:XValidation:rule="has(self.provider) == has(oldSelf.provider)",message="provider cannot be added or removed: a server is self-hosted or cloud for its lifetime"
 type DatabaseServerSpec struct {
 	common.CloudServerCommon `json:",inline"`
 	PostgreSQL               `json:",inline"`

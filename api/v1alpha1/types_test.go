@@ -22,8 +22,8 @@ var (
 	_ lifecycle.Claim    = (*DatabaseRole)(nil)
 	_ server.CloudServer = (*ClusterDatabaseServer)(nil)
 	_ server.CloudServer = (*DatabaseServer)(nil)
-	_ probe.CloudServer = (*ClusterDatabaseServer)(nil)
-	_ probe.CloudServer = (*DatabaseServer)(nil)
+	_ probe.CloudServer  = (*ClusterDatabaseServer)(nil)
+	_ probe.CloudServer  = (*DatabaseServer)(nil)
 )
 
 func TestAddToScheme(t *testing.T) {
