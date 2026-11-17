@@ -455,11 +455,12 @@ func TestAzurePasswordRole(t *testing.T) {
 	}
 	h.fake.want(t, "CREATE ROLE")
 
-	// IAM mode needs an Entra principal (azure_iam_test.go has its lifecycle).
+	// IAM mode needs an Entra administrator, which this server (password
+	// administrator) lacks (azure_iam_test.go has its lifecycle and checks).
 	h.rec.Reset()
 	iam := h.role("orders-iam", "orders", func(r *dbv1alpha1.DatabaseRole) { r.Spec.AuthMode = dbv1alpha1.AuthModeIAM })
-	if err := h.reconcile(rr, iam); !errors.Is(err, ErrIAMPrincipalInvalidEntra) {
-		t.Errorf("IAM on Azure without a principal: %v", err)
+	if err := h.reconcile(rr, iam); !errors.Is(err, ErrAuthModeUnsupported) {
+		t.Errorf("IAM on Azure with a password administrator: %v", err)
 	}
-	h.rec.AssertEvent(t, "Warning", ReasonIAMPrincipalRequired, "")
+	h.rec.AssertEvent(t, "Warning", ReasonAuthModeUnsupported, "")
 }
