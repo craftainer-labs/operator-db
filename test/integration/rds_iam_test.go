@@ -178,7 +178,7 @@ func TestRDSIAMResourceARN(t *testing.T) {
 	h.createInstance(t, id)
 
 	srv := h.server(id, motoEndpoint(t))
-	if _, err := (controller.Prober{Config: h.cfg}).Probe(ctx, srv, h.conn); err != nil {
+	if _, err := probeVersion(ctx, controller.Prober{Config: h.cfg}, srv, h.conn, nil); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	out, err := h.rds.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{DBInstanceIdentifier: aws.String(id)})

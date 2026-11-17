@@ -57,7 +57,9 @@ spec:
             description: spec defines the desired state of DatabaseServer
             properties:
               adminCredentialsSecretRef:
-                description: AdminCredentialsSecretRef names the admin credentials.
+                description: |-
+                  AdminCredentialsSecretRef names the data-plane admin credentials. Unset
+                  on a server that logs in with its cloud identity.
                 properties:
                   key:
                     description: Key limits the credentials to one key of the Secret.
@@ -352,13 +354,13 @@ spec:
                     maxLength: 253
                     type: string
                 type: object
-            required:
-            - adminCredentialsSecretRef
             type: object
             x-kubernetes-validations:
+            - message: adminCredentialsSecretRef is required
+              rule: has(self.adminCredentialsSecretRef)
             - message: 'adminCredentialsSecretRef.namespace is forbidden on a namespaced
                 server: the Secret is in the server''s namespace'
-              rule: '!has(self.adminCredentialsSecretRef.namespace)'
+              rule: '!has(self.adminCredentialsSecretRef) || !has(self.adminCredentialsSecretRef.namespace)'
             - message: host is required without provider
               rule: has(self.provider) || (has(self.host) && size(self.host) > 0)
             - message: only provider.type AWS, GCP and Azure are supported
@@ -437,10 +439,11 @@ spec:
                 additionalProperties:
                   type: string
                 description: |-
-                  discovered is what the probe read from the cloud: endpoint, port,
-                  resourceId, accountId and region on AWS; endpoint, port, region,
-                  instanceConnectionName and dnsName on Cloud SQL; endpoint, port, resourceId
-                  and region on an Azure flexible server.
+                  Discovered is what the operator read from the cloud for a cloud server:
+                  endpoint, port, resourceId, accountId and region (ADR 0002, section
+                  16.1). The probe (a cloud Prober of package probe) or the operator's
+                  controller fills it; claims read it from the cached server. A
+                  self-hosted server leaves it empty.
                 maxProperties: 10
                 type: object
                 x-kubernetes-validations:

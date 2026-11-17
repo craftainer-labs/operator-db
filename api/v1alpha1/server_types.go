@@ -36,7 +36,24 @@ const (
 	SSLModeRequire SSLMode = "require"
 )
 
-// PostgreSQL holds the fields both server kinds add to common.ServerCommon.
+// AdminAuthMode is how the operator logs in to the data plane as the server's
+// administrator.
+// +kubebuilder:validation:Enum=Password;IAM
+type AdminAuthMode string
+
+// Values of AdminAuthMode.
+const (
+	// AdminAuthModePassword is the administrator named by
+	// adminCredentialsSecretRef, with its password.
+	AdminAuthModePassword AdminAuthMode = "Password"
+	// AdminAuthModeIAM is the Entra administrator named by
+	// provider.azure.entraAdmin, with an Entra token fetched for each
+	// connection. Azure only.
+	AdminAuthModeIAM AdminAuthMode = "IAM"
+)
+
+// PostgreSQL holds the fields both server kinds add to
+// common.CloudServerCommon.
 type PostgreSQL struct {
 	// host is the server's host name or IP address. It is required without
 	// spec.provider; with one it overrides the discovered address (for an
@@ -79,13 +96,16 @@ type PostgreSQL struct {
 }
 
 // ClusterDatabaseServerSpec defines the desired state of ClusterDatabaseServer.
-// +kubebuilder:validation:XValidation:rule="has(self.adminCredentialsSecretRef.namespace) && size(self.adminCredentialsSecretRef.namespace) > 0",message="adminCredentialsSecretRef.namespace is required on a cluster server: name the operator's namespace"
+// +kubebuilder:validation:XValidation:rule="!has(self.adminCredentialsSecretRef) || (has(self.adminCredentialsSecretRef.namespace) && size(self.adminCredentialsSecretRef.namespace) > 0)",message="adminCredentialsSecretRef.namespace is required on a cluster server: name the operator's namespace"
+// +kubebuilder:validation:XValidation:rule="(has(self.adminAuthMode) && self.adminAuthMode == 'IAM') ? !has(self.adminCredentialsSecretRef) : has(self.adminCredentialsSecretRef)",message="adminCredentialsSecretRef is required, and forbidden with adminAuthMode IAM"
+// +kubebuilder:validation:XValidation:rule="!has(self.adminAuthMode) || self.adminAuthMode != 'IAM' || (has(self.provider) && self.provider.type == 'Azure')",message="adminAuthMode IAM is allowed only with provider.type Azure"
+// +kubebuilder:validation:XValidation:rule="(has(self.adminAuthMode) && self.adminAuthMode == 'IAM') == (has(self.provider) && has(self.provider.azure) && has(self.provider.azure.entraAdmin))",message="provider.azure.entraAdmin is required with adminAuthMode IAM and forbidden otherwise"
 // +kubebuilder:validation:XValidation:rule="has(self.provider) || (has(self.host) && size(self.host) > 0)",message="host is required without provider"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type in ['AWS', 'GCP', 'Azure']",message="only provider.type AWS, GCP and Azure are supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
 type ClusterDatabaseServerSpec struct {
-	common.ServerCommon `json:",inline"`
-	PostgreSQL          `json:",inline"`
+	common.CloudServerCommon `json:",inline"`
+	PostgreSQL               `json:",inline"`
 
 	// provider says the server is a managed cloud database. It is immutable
 	// in its type: claims already point at objects in the cloud it names.
@@ -97,6 +117,15 @@ type ClusterDatabaseServerSpec struct {
 	// +optional
 	Credentials *cloud.Credentials `json:"credentials,omitempty"`
 
+	// adminAuthMode is how the operator logs in to the data plane as the
+	// administrator: Password (the default) with adminCredentialsSecretRef, or
+	// IAM, the Entra administrator named by provider.azure.entraAdmin with a
+	// token from the identity behind credentials (Azure only). With IAM,
+	// adminCredentialsSecretRef is forbidden.
+	// +kubebuilder:default=Password
+	// +optional
+	AdminAuthMode AdminAuthMode `json:"adminAuthMode,omitempty"`
+
 	// allowedNamespaces says which namespaces may use the server. It is
 	// required, so a cluster server without it is rejected: it fails closed.
 	AllowedNamespaces common.AllowedNamespaces `json:"allowedNamespaces"`
@@ -104,14 +133,15 @@ type ClusterDatabaseServerSpec struct {
 
 // DatabaseServerSpec defines the desired state of DatabaseServer. A namespaced
 // server serves only claims in its own namespace and has no allowedNamespaces.
-// +kubebuilder:validation:XValidation:rule="!has(self.adminCredentialsSecretRef.namespace)",message="adminCredentialsSecretRef.namespace is forbidden on a namespaced server: the Secret is in the server's namespace"
+// +kubebuilder:validation:XValidation:rule="has(self.adminCredentialsSecretRef)",message="adminCredentialsSecretRef is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.adminCredentialsSecretRef) || !has(self.adminCredentialsSecretRef.namespace)",message="adminCredentialsSecretRef.namespace is forbidden on a namespaced server: the Secret is in the server's namespace"
 // +kubebuilder:validation:XValidation:rule="has(self.provider) || (has(self.host) && size(self.host) > 0)",message="host is required without provider"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type in ['AWS', 'GCP', 'Azure']",message="only provider.type AWS, GCP and Azure are supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || has(self.credentials)",message="a namespaced server with a provider must set credentials with source Secret: it cannot use WorkloadIdentity"
 type DatabaseServerSpec struct {
-	common.ServerCommon `json:",inline"`
-	PostgreSQL          `json:",inline"`
+	common.CloudServerCommon `json:",inline"`
+	PostgreSQL               `json:",inline"`
 
 	// provider says the server is a managed cloud database.
 	// +optional
@@ -145,7 +175,7 @@ type ClusterDatabaseServer struct {
 
 	// status defines the observed state of ClusterDatabaseServer
 	// +optional
-	Status DatabaseServerStatus `json:"status,omitzero"`
+	Status common.ServerStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
@@ -179,7 +209,7 @@ type DatabaseServer struct {
 
 	// status defines the observed state of DatabaseServer
 	// +optional
-	Status DatabaseServerStatus `json:"status,omitzero"`
+	Status common.ServerStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
@@ -191,35 +221,61 @@ type DatabaseServerList struct {
 	Items           []DatabaseServer `json:"items"`
 }
 
-// GetCommon returns the settings every server kind shares (server.Server).
-func (s *ClusterDatabaseServer) GetCommon() *common.ServerCommon { return &s.Spec.ServerCommon }
+// GetCloudCommon returns the settings every cloud-capable server kind shares
+// (server.CloudServer).
+func (s *ClusterDatabaseServer) GetCloudCommon() *common.CloudServerCommon {
+	return &s.Spec.CloudServerCommon
+}
 
-// GetServerStatus returns the status the probe writes (probe.Server).
-func (s *ClusterDatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status.ServerStatus }
+// GetServerStatus returns the status the probe writes (probe.CloudServer).
+func (s *ClusterDatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status }
 
-// GetEndpoint returns host:port (server.Server).
+// GetEndpoint returns host:port (server.CloudServer).
 func (s *ClusterDatabaseServer) GetEndpoint() string {
 	return hostPort(s.Spec.PostgreSQL, s.Status.Discovered)
 }
 
-// GetAllowedNamespaces returns spec.allowedNamespaces (server.Server).
+// GetAllowedNamespaces returns spec.allowedNamespaces (server.CloudServer).
 func (s *ClusterDatabaseServer) GetAllowedNamespaces() *common.AllowedNamespaces {
 	return &s.Spec.AllowedNamespaces
 }
 
-// GetCommon returns the settings every server kind shares (server.Server).
-func (s *DatabaseServer) GetCommon() *common.ServerCommon { return &s.Spec.ServerCommon }
+// GetCredentialsSecret returns the Secret of spec.credentials.secretRef, and an
+// empty name for workload identity (server.CloudServer).
+func (s *ClusterDatabaseServer) GetCredentialsSecret() (name, namespace string) {
+	c := s.Spec.Credentials
+	if c == nil || c.Source != cloud.SourceSecret || c.SecretRef == nil {
+		return "", ""
+	}
+	return c.SecretRef.Name, c.SecretRef.Namespace
+}
 
-// GetServerStatus returns the status the probe writes (probe.Server).
-func (s *DatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status.ServerStatus }
+// GetCloudCommon returns the settings every cloud-capable server kind shares
+// (server.CloudServer).
+func (s *DatabaseServer) GetCloudCommon() *common.CloudServerCommon { return &s.Spec.CloudServerCommon }
 
-// GetEndpoint returns host:port (server.Server).
+// GetServerStatus returns the status the probe writes (probe.CloudServer).
+func (s *DatabaseServer) GetServerStatus() *common.ServerStatus { return &s.Status }
+
+// GetEndpoint returns host:port (server.CloudServer).
 func (s *DatabaseServer) GetEndpoint() string {
 	return hostPort(s.Spec.PostgreSQL, s.Status.Discovered)
 }
 
-// GetAllowedNamespaces returns nil: a namespaced server has none (server.Server).
+// GetAllowedNamespaces returns nil: a namespaced server has none
+// (server.CloudServer).
 func (s *DatabaseServer) GetAllowedNamespaces() *common.AllowedNamespaces { return nil }
+
+// GetCredentialsSecret returns the Secret of spec.credentials.secretRef, which
+// is in the server's own namespace, and an empty name when there is none
+// (server.CloudServer).
+func (s *DatabaseServer) GetCredentialsSecret() (name, namespace string) {
+	c := s.Spec.Credentials
+	if c == nil || c.Source != cloud.SourceSecret || c.SecretRef == nil {
+		return "", ""
+	}
+	return c.SecretRef.Name, s.Namespace
+}
 
 func init() {
 	SchemeBuilder.Register(func(s *runtime.Scheme) error {

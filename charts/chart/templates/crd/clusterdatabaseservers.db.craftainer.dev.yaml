@@ -56,8 +56,22 @@ spec:
           spec:
             description: spec defines the desired state of ClusterDatabaseServer
             properties:
+              adminAuthMode:
+                default: Password
+                description: |-
+                  adminAuthMode is how the operator logs in to the data plane as the
+                  administrator: Password (the default) with adminCredentialsSecretRef, or
+                  IAM, the Entra administrator named by provider.azure.entraAdmin with a
+                  token from the identity behind credentials (Azure only). With IAM,
+                  adminCredentialsSecretRef is forbidden.
+                enum:
+                - Password
+                - IAM
+                type: string
               adminCredentialsSecretRef:
-                description: AdminCredentialsSecretRef names the admin credentials.
+                description: |-
+                  AdminCredentialsSecretRef names the data-plane admin credentials. Unset
+                  on a server that logs in with its cloud identity.
                 properties:
                   key:
                     description: Key limits the credentials to one key of the Secret.
@@ -284,6 +298,14 @@ spec:
                         maxLength: 2048
                         pattern: ^https?://[^\s]+$
                         type: string
+                      entraAdmin:
+                        description: |-
+                          entraAdmin is the Entra principal name of the identity behind
+                          credentials, which logs in to the server as its Entra administrator. It
+                          is required with adminAuthMode IAM and forbidden otherwise.
+                        maxLength: 128
+                        minLength: 1
+                        type: string
                       resourceGroup:
                         description: ResourceGroup is the resource group of the resources.
                         pattern: ^[-\w._()]{1,90}$
@@ -442,14 +464,24 @@ spec:
                     type: string
                 type: object
             required:
-            - adminCredentialsSecretRef
             - allowedNamespaces
             type: object
             x-kubernetes-validations:
             - message: 'adminCredentialsSecretRef.namespace is required on a cluster
                 server: name the operator''s namespace'
-              rule: has(self.adminCredentialsSecretRef.namespace) && size(self.adminCredentialsSecretRef.namespace)
-                > 0
+              rule: '!has(self.adminCredentialsSecretRef) || (has(self.adminCredentialsSecretRef.namespace)
+                && size(self.adminCredentialsSecretRef.namespace) > 0)'
+            - message: adminCredentialsSecretRef is required, and forbidden with adminAuthMode
+                IAM
+              rule: '(has(self.adminAuthMode) && self.adminAuthMode == ''IAM'') ?
+                !has(self.adminCredentialsSecretRef) : has(self.adminCredentialsSecretRef)'
+            - message: adminAuthMode IAM is allowed only with provider.type Azure
+              rule: '!has(self.adminAuthMode) || self.adminAuthMode != ''IAM'' ||
+                (has(self.provider) && self.provider.type == ''Azure'')'
+            - message: provider.azure.entraAdmin is required with adminAuthMode IAM
+                and forbidden otherwise
+              rule: (has(self.adminAuthMode) && self.adminAuthMode == 'IAM') == (has(self.provider)
+                && has(self.provider.azure) && has(self.provider.azure.entraAdmin))
             - message: host is required without provider
               rule: has(self.provider) || (has(self.host) && size(self.host) > 0)
             - message: only provider.type AWS, GCP and Azure are supported
@@ -525,10 +557,11 @@ spec:
                 additionalProperties:
                   type: string
                 description: |-
-                  discovered is what the probe read from the cloud: endpoint, port,
-                  resourceId, accountId and region on AWS; endpoint, port, region,
-                  instanceConnectionName and dnsName on Cloud SQL; endpoint, port, resourceId
-                  and region on an Azure flexible server.
+                  Discovered is what the operator read from the cloud for a cloud server:
+                  endpoint, port, resourceId, accountId and region (ADR 0002, section
+                  16.1). The probe (a cloud Prober of package probe) or the operator's
+                  controller fills it; claims read it from the cached server. A
+                  self-hosted server leaves it empty.
                 maxProperties: 10
                 type: object
                 x-kubernetes-validations:

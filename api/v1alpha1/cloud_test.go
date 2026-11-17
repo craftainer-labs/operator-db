@@ -128,6 +128,55 @@ func TestAzureProviderRules(t *testing.T) {
 	invalid(t, wi, "must use source Secret")
 }
 
+// adminAuthMode IAM (NKdb-3b): the Entra administrator, Azure and cluster kinds
+// only, with entraAdmin and without an admin Secret.
+func TestAdminAuthModeRules(t *testing.T) {
+	g := NewWithT(t)
+	iam := func(name string) *ClusterDatabaseServer {
+		s := azureCluster(name)
+		s.Spec.AdminCredentialsSecretRef = nil
+		s.Spec.AdminAuthMode = AdminAuthModeIAM
+		s.Spec.Provider.Azure.EntraAdmin = "operator@contoso.example"
+		return s
+	}
+	g.Expect(k8sClient.Create(ctx, iam("adm-ok"))).To(Succeed())
+	// Password is the default, and needs the Secret.
+	def := azureCluster("adm-default")
+	g.Expect(k8sClient.Create(ctx, def)).To(Succeed())
+	g.Expect(def.Spec.AdminAuthMode).To(Equal(AdminAuthModePassword))
+	noSecret := azureCluster("adm-no-secret")
+	noSecret.Spec.AdminCredentialsSecretRef = nil
+	invalid(t, noSecret, "adminCredentialsSecretRef is required")
+	withSecret := iam("adm-with-secret")
+	withSecret.Spec.AdminCredentialsSecretRef = clusterServerObj("x").Spec.AdminCredentialsSecretRef
+	invalid(t, withSecret, "forbidden with adminAuthMode IAM")
+	noEntra := iam("adm-no-entra")
+	noEntra.Spec.Provider.Azure.EntraAdmin = ""
+	invalid(t, noEntra, "entraAdmin is required with adminAuthMode IAM")
+	stray := azureCluster("adm-stray-entra")
+	stray.Spec.Provider.Azure.EntraAdmin = "operator@contoso.example"
+	invalid(t, stray, "entraAdmin is required with adminAuthMode IAM and forbidden otherwise")
+	long := iam("adm-long-entra")
+	long.Spec.Provider.Azure.EntraAdmin = strings.Repeat("a", 129)
+	invalid(t, long, "entraAdmin")
+	// IAM is Azure only, and not on a self-hosted server.
+	aws := awsCluster("adm-aws")
+	aws.Spec.AdminCredentialsSecretRef = nil
+	aws.Spec.AdminAuthMode = AdminAuthModeIAM
+	invalid(t, aws, "adminAuthMode IAM is allowed only with provider.type Azure")
+	self := clusterServerObj("adm-self")
+	self.Spec.AdminCredentialsSecretRef = nil
+	self.Spec.AdminAuthMode = AdminAuthModeIAM
+	invalid(t, self, "adminAuthMode IAM is allowed only with provider.type Azure")
+	bad := azureCluster("adm-bad-mode")
+	bad.Spec.AdminAuthMode = "Token"
+	invalid(t, bad, "adminAuthMode")
+	// A namespaced server has no adminAuthMode and needs its Secret.
+	ns := azureNamespaced("adm-ns-no-secret")
+	ns.Spec.AdminCredentialsSecretRef = nil
+	invalid(t, ns, "adminCredentialsSecretRef is required")
+}
+
 func gcpNamespaced(name string) *DatabaseServer {
 	s := serverObj(name)
 	s.Spec.Host = ""

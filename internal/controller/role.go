@@ -78,14 +78,14 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 }
 
 // checkIAM is the precondition of an IAM-mode claim, in this order: the server
-// must be one whose provider supports IAM (AWS or GCP; AuthModeUnsupported
-// otherwise, whatever else is wrong), the rotate annotation is answered with
-// RotationNotApplicable, iam.principal must fit the provider (refused on AWS,
-// required and valid on GCP: IAMPrincipalRequired), the Database must be usable
-// (derr) and, on AWS, the ARN of the login must be known. It records the ARN on
-// x.
+// must be one whose provider supports IAM (AWS, GCP or Azure;
+// AuthModeUnsupported otherwise, whatever else is wrong), the rotate annotation
+// is answered with RotationNotApplicable, iam.principal must fit the provider
+// (refused on AWS, required and valid on GCP and Azure: IAMPrincipalRequired),
+// the Database must be usable (derr) and, on AWS, the ARN of the login must be
+// known. It records the ARN on x.
 func (r *RoleReconciler) checkIAM(role *dbv1alpha1.DatabaseRole, x *roleExternal, derr error) error {
-	if p := x.be.provider; p != cloud.ProviderAWS && p != cloud.ProviderGCP {
+	if p := x.be.provider; p != cloud.ProviderAWS && p != cloud.ProviderGCP && p != cloud.ProviderAzure {
 		r.warn(role, ReasonAuthModeUnsupported, ErrAuthModeUnsupported.Error())
 		return ErrAuthModeUnsupported
 	}
@@ -99,7 +99,7 @@ func (r *RoleReconciler) checkIAM(role *dbv1alpha1.DatabaseRole, x *roleExternal
 	if derr != nil {
 		return derr
 	}
-	if x.be.provider == cloud.ProviderGCP {
+	if x.be.provider != cloud.ProviderAWS {
 		return nil
 	}
 	var err error
@@ -112,15 +112,30 @@ func (r *RoleReconciler) checkIAM(role *dbv1alpha1.DatabaseRole, x *roleExternal
 var ErrIAMPrincipalRefused = errors.New("IAMPrincipalRequired: iam.principal is not used on AWS")
 
 // checkPrincipal checks iam.principal against the provider: refused on AWS,
-// required and a valid Cloud SQL user name on GCP.
+// required and a valid Cloud SQL user name on GCP, required and a valid Entra
+// principal name on Azure.
 func checkPrincipal(p cloud.ProviderType, iam *dbv1alpha1.IAMSpec) error {
 	switch {
 	case p == cloud.ProviderAWS && iam != nil:
 		return ErrIAMPrincipalRefused
 	case p == cloud.ProviderGCP && (iam == nil || !ValidPrincipal(iam.Principal)):
 		return ErrIAMPrincipalInvalid
+	case p == cloud.ProviderAzure && (iam == nil || !ValidEntraPrincipal(iam.Principal)):
+		return ErrIAMPrincipalInvalidEntra
 	}
 	return nil
+}
+
+// principalNamed returns the database user an IAM-mode claim is named by, and
+// whether it is: on Cloud SQL and Azure the user's name is the principal's,
+// chosen by the claim (ADR 0002 section 16.4); on AWS it is derived.
+func principalNamed(p cloud.ProviderType, iam *dbv1alpha1.IAMSpec) (string, bool) {
+	switch {
+	case iam == nil:
+	case p == cloud.ProviderGCP && ValidPrincipal(iam.Principal), p == cloud.ProviderAzure && ValidEntraPrincipal(iam.Principal):
+		return iam.Principal, true
+	}
+	return "", false
 }
 
 // warn records a Warning Event on a claim, when there is a recorder.
@@ -224,12 +239,13 @@ func newRoleExternal(be *backend, claim *dbv1alpha1.DatabaseRole) *roleExternal 
 	base := claim.GetExternalName()
 	if base == "" {
 		base = pgclient.RoleBase(claim.Namespace, claim.Name)
-		// On Cloud SQL the IAM user's name is the principal's, chosen by the claim
-		// (ADR 0002 section 16.4). A principal that is not valid is refused by
-		// checkIAM, and the derived name is only a placeholder then.
-		if be.provider == cloud.ProviderGCP && claim.Spec.AuthMode == dbv1alpha1.AuthModeIAM &&
-			claim.Spec.IAM != nil && ValidPrincipal(claim.Spec.IAM.Principal) {
-			base = claim.Spec.IAM.Principal
+		// On Cloud SQL and Azure the IAM user's name is the principal's, chosen by
+		// the claim (ADR 0002 section 16.4). A principal that is not valid is
+		// refused by checkIAM, and the derived name is only a placeholder then.
+		if claim.Spec.AuthMode == dbv1alpha1.AuthModeIAM {
+			if name, ok := principalNamed(be.provider, claim.Spec.IAM); ok {
+				base = name
+			}
 		}
 		claim.SetExternalName(base)
 	}
@@ -312,7 +328,7 @@ func (e *roleExternal) observe(ctx context.Context, iam bool) (lifecycle.Observa
 		}
 		if r.info.Marker.Claim != e.id {
 			label := r.name
-			if iam && e.be.provider == cloud.ProviderGCP {
+			if iam && (e.be.provider == cloud.ProviderGCP || e.be.provider == cloud.ProviderAzure) {
 				// Named by the principal, personal data that errors carry to the log.
 				label = e.claim.Name
 			}
@@ -543,10 +559,14 @@ func (e iamRoleExternal) Update(ctx context.Context, _ dbv1alpha1.DatabaseRoleSp
 }
 
 // Delete implements lifecycle.External: the role is dropped as in Password
-// mode, when it is the claim's; on Cloud SQL its IAM user is deleted too.
+// mode, when it is the claim's; on Cloud SQL its IAM user is deleted too, and
+// on Azure its role is dropped without naming it in an error.
 func (e iamRoleExternal) Delete(ctx context.Context, cur pgclient.RoleState) error {
-	if e.x.be.provider == cloud.ProviderGCP {
+	switch e.x.be.provider {
+	case cloud.ProviderGCP:
 		return e.x.deleteCloudSQLUser(ctx)
+	case cloud.ProviderAzure:
+		return e.x.deleteEntraRole(ctx)
 	}
 	return e.x.Delete(ctx, cur)
 }
@@ -557,9 +577,12 @@ func (e *roleExternal) issueIAM(ctx context.Context) (binding.Data, error) {
 		Base: e.base, Database: e.database, Marker: e.marker(""), ConnLimit: e.limit, Privileges: e.privileges,
 	}
 	var err error
-	if e.be.provider == cloud.ProviderGCP {
+	switch e.be.provider {
+	case cloud.ProviderGCP:
 		err = e.be.admin.ApplyCloudSQLIAMRole(ctx, p, e.insertCloudSQLUser)
-	} else {
+	case cloud.ProviderAzure:
+		err = e.be.admin.ApplyEntraIAMRole(ctx, p)
+	default:
 		err = e.be.admin.ApplyIAMRole(ctx, p)
 	}
 	if err != nil {
@@ -597,12 +620,25 @@ func (e *roleExternal) deleteCloudSQLUser(ctx context.Context) error {
 	return err
 }
 
+// deleteEntraRole removes what is the claim's of an Azure Entra role: the
+// objects it owns go to the admin role and the role is dropped. A role that is
+// not the claim's is skipped.
+func (e *roleExternal) deleteEntraRole(ctx context.Context) error {
+	skipped, err := e.be.admin.DropEntraIAMRole(ctx, e.base, e.id, e.database)
+	if skipped {
+		log.FromContext(ctx).Info("the Entra role is not this claim's and was left alone")
+	}
+	return err
+}
+
 // iamData is the binding of an IAM-mode login (docs/crd-drafts.md, "db x
 // cloud"): no password and no uri, which would carry one. On AWS the consumer
 // builds a token for username with the AWS SDK and needs the region and the ARN
 // its role may connect to; on Cloud SQL username is the principal and the
 // consumer connects through the Cloud SQL connector with IAM authentication,
-// which needs the instance connection name.
+// which needs the instance connection name; on Azure username is the Entra
+// principal and the consumer logs in with an Entra token for the scope
+// https://ossrdbms-aad.database.windows.net/.default as the password.
 func (e *roleExternal) iamData() binding.Data {
 	host, port, sslmode := e.endpoint()
 	d := binding.Data{

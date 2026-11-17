@@ -4,8 +4,8 @@
 
 Implemented for the AWS backend in password mode (NKdb-1a) and IAM mode
 (NKdb-1b), for the GCP backend (Cloud SQL, NKdb-2) and for the Azure backend in
-Password mode (NKdb-3a). The Azure Entra login and IAM mode (NKdb-3b) add to
-its verification.
+Password mode (NKdb-3a), and for the Azure Entra administrator login and IAM
+mode (NKdb-3b).
 
 ## Attribute
 
@@ -54,6 +54,15 @@ plan Track NK, rows EB-2, EB-3, EB-5, EB-9 and EB-14).
   subscription, the resource group and the server, is never kept. The operator's
   Azure permission is read access to the flexible server
   (`Microsoft.DBforPostgreSQL/flexibleServers/read`).
+- The Entra administrator's token (adminAuthMode IAM) comes from the same
+  credential, through the same egress policy, and is used only as the password
+  of a connection to the server: it is fetched for each new connection (cached
+  by the source until a minute before it expires), never stored, logged or put
+  in a condition, and the pool of the admin session is replaced when the cloud
+  credentials Secret changes (its hash is part of the pool's stamp). A failed
+  fetch is `cloud.ErrCredentialsUnavailable`, a category. The principal an IAM
+  claim names (personal data) is in the binding Secret and the status only: the
+  errors of the Entra role SQL do not carry it.
 
 ## Source
 
@@ -109,8 +118,33 @@ ADR 0002 section 16 of lib-operator-go.
   services: that Azure accepts the operator's credentials, the workload identity
   chain (AKS), the shape of a real `servers.get` answer beyond the recorded one,
   and that the admin of a flexible server may run the Password-mode statements.
-  Entra token validation, the Entra administrator login and `pgaadauth` belong
-  to NKdb-3b and are untested in CI there too (no emulator).
+  Entra token validation, the Entra administrator login and `pgaadauth` are
+  untested in CI too (no emulator), see "Entra login and IAM mode" below.
+- Unit, Azure Entra (`internal/controller/azure_iam_test.go`):
+  `TestEntraSource` (the token from the fake authority for the PostgreSQL
+  scope; a refused credential is a category and leaks nothing; strict mode
+  refuses `endpointOverride`), `TestAzureEntraAdminLogin` (the admin
+  connection and the probe use the Entra administrator and a token, no admin
+  Secret), `TestAzureIAMRoleLifecycle` (the SQL issued, the marker, the binding
+  without a password, the collision, the drop), `TestAzureIAMPrincipalChecks`,
+  `TestValidEntraPrincipal`; `internal/pgclient` (`TestApplyEntraIAMRole`,
+  `TestDropEntraIAMRole`, `TestTokenIsFetchedForEachNewConnection`); the pool
+  stamp (`TestStampCoversEverythingTheConnectionIsBuiltFrom`); CEL
+  (`TestAdminAuthModeRules`).
+- Integration (job `azure`), Entra: `TestAzureEntraAdminProbe` (the fake Entra
+  authority hands the token to a real SCRAM login of a PostgreSQL role whose
+  password is that token; a token the server does not accept is an
+  authentication failure) and `TestAzureEntraIAMRole` (a stub of
+  `pgaadauth_create_principal` with the real signature in the PostgreSQL
+  service container: the SQL the operator issues, the marker, the grants and
+  the drop).
+- **Entra login and IAM mode, not verified by any emulator:** there is no real
+  Azure PostgreSQL Entra login to test against. `pgaadauth_create_principal` is
+  checked only as the SQL the operator issues, against a stand-in function in a
+  plain PostgreSQL container; what the real function does (resolving the
+  principal in the tenant, the `security label` it sets, the privileges the
+  Entra administrator needs to alter and drop the role it creates), Entra token
+  validation by the server, and the consumer's token login are untested in CI.
 - **Untested in CI (GCP):** sqladmin and IAM token validation against a real
   service: that Cloud SQL accepts the operator's credentials, the
   WorkloadIdentity chain (GKE), `users.insert` and `users.delete` with real

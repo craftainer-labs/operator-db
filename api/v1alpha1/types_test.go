@@ -46,7 +46,7 @@ func TestServerAccessors(t *testing.T) {
 	cluster.Spec.Host = "pg.example.svc"
 	cluster.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
 	cluster.Spec.ProxyURL = "http://proxy:3128"
-	g.Expect(cluster.GetCommon().ProxyURL).To(Equal("http://proxy:3128"))
+	g.Expect(cluster.GetCloudCommon().ProxyURL).To(Equal("http://proxy:3128"))
 	g.Expect(cluster.GetAllowedNamespaces().From).To(Equal(common.NamespacesAll))
 	// An unset port is the default; a set one is used.
 	g.Expect(cluster.GetEndpoint()).To(Equal("pg.example.svc:5432"))
@@ -57,7 +57,7 @@ func TestServerAccessors(t *testing.T) {
 	namespaced.Spec.Host = "::1"
 	namespaced.Spec.Port = 5433
 	namespaced.Spec.ProxyURL = "socks5://p:1080"
-	g.Expect(namespaced.GetCommon().ProxyURL).To(Equal("socks5://p:1080"))
+	g.Expect(namespaced.GetCloudCommon().ProxyURL).To(Equal("socks5://p:1080"))
 	g.Expect(namespaced.GetAllowedNamespaces()).To(BeNil())
 	g.Expect(namespaced.GetEndpoint()).To(Equal("[::1]:5433"))
 

@@ -496,6 +496,40 @@ func (a Admin) ApplyCloudSQLIAMRole(ctx context.Context, p RoleParams, insert fu
 	return a.apply(ctx, p, stmts, grants)
 }
 
+// EntraPrincipalFunction is the Azure Database for PostgreSQL function that
+// creates the role of an Entra principal:
+// pgaadauth_create_principal(roleName text, isAdmin boolean, isMfa boolean). It
+// exists only on an Azure flexible server with Microsoft Entra authentication,
+// and only its Entra administrator may call it.
+const EntraPrincipalFunction = "pgaadauth_create_principal"
+
+// ApplyEntraIAMRole is ApplyCloudSQLIAMRole for an Azure flexible server (ADR
+// 0005): the login role of an Entra principal is created with
+// pgaadauth_create_principal(<principal>, false, false), a plain role without
+// azure_pg_admin, and Base is the principal's name. The ownership check, the
+// marker written right after the create and the rest are as there: a role of
+// that name without this claim's marker is refused (ErrNotOwned) before the
+// function is called, and a crash between the call and the marker leaves an
+// unmarked role that reads as a collision until an administrator removes it.
+func (a Admin) ApplyEntraIAMRole(ctx context.Context, p RoleParams) error {
+	return a.ApplyCloudSQLIAMRole(ctx, p, func(ctx context.Context) error {
+		return a.with(ctx, "", func(s Session) error {
+			_, err := s.Query(ctx, "SELECT "+EntraPrincipalFunction+"("+Literal(p.Base)+", false, false)")
+			return err
+		})
+	})
+}
+
+// DropEntraIAMRole is DropCloudSQLIAMRole for an Azure flexible server: the
+// role is dropped with DROP ROLE after its objects went to the admin role.
+func (a Admin) DropEntraIAMRole(ctx context.Context, base, claim, database string) (skipped bool, err error) {
+	return a.DropCloudSQLIAMRole(ctx, base, claim, database, func(ctx context.Context) error {
+		return redact(a.with(ctx, "", func(s Session) error {
+			return s.Exec(ctx, "DROP ROLE IF EXISTS "+Ident(base))
+		}), base)
+	})
+}
+
 // DropCloudSQLIAMRole removes the Cloud SQL IAM user of a claim: its sessions
 // are ended, the objects it owns go to the admin role, the admin role's
 // temporary membership (the grant REASSIGN OWNED needs) is revoked, and remove deletes the

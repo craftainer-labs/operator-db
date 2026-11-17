@@ -66,7 +66,7 @@ func ref() common.ServerRef {
 func clusterServerObj(name string) *ClusterDatabaseServer {
 	s := &ClusterDatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	s.Spec.Host = "pg.example.svc"
-	s.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "admin", Namespace: "operator-db-system"}
+	s.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "admin", Namespace: "operator-db-system"}
 	s.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
 	return s
 }
@@ -74,7 +74,7 @@ func clusterServerObj(name string) *ClusterDatabaseServer {
 func serverObj(name string) *DatabaseServer {
 	s := &DatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
 	s.Spec.Host = "pg.example.svc"
-	s.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "admin"}
+	s.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "admin"}
 	return s
 }
 

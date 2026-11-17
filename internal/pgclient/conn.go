@@ -40,6 +40,11 @@ type Target struct {
 	Database string
 	User     string
 	Password string
+	// Token, when set, supplies the password of every new connection (an Entra
+	// token, valid for a short time) and Password is not used. It is called
+	// once for each connection that is opened, never cached here: the source
+	// caches until a token is near its expiry.
+	Token func(ctx context.Context) (string, error)
 	// ServerName overrides the host used for certificate verification.
 	ServerName string
 	// CABundle is PEM; empty uses the system roots.
@@ -108,6 +113,11 @@ func Connect(ctx context.Context, t Target) (Session, error) {
 	cfg, err := t.config()
 	if err != nil {
 		return nil, err
+	}
+	if t.Token != nil {
+		if cfg.Password, err = t.Token(ctx); err != nil {
+			return nil, err
+		}
 	}
 	c, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {

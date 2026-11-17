@@ -144,19 +144,23 @@ func TestStampCoversEverythingTheConnectionIsBuiltFrom(t *testing.T) {
 		CABundle: []byte("ca"), MinTLS: 771,
 	}
 	proxy, _ := url.Parse("http://proxy:3128")
-	ref := stamp(base, target, nil)
-	if stamp(base, target, nil) != ref {
+	ref := stamp(base, target, nil, nil)
+	if stamp(base, target, nil, nil) != ref {
 		t.Fatal("stamp is not deterministic")
 	}
 	variants := map[string]string{
-		"uid":        stamp(serverObject{uid: "other", generation: 1}, target, nil),
-		"generation": stamp(serverObject{uid: "uid", generation: 2}, target, nil),
-		"proxy":      stamp(base, target, proxy),
+		"uid":        stamp(serverObject{uid: "other", generation: 1}, target, nil, nil),
+		"generation": stamp(serverObject{uid: "uid", generation: 2}, target, nil, nil),
+		"proxy":      stamp(base, target, proxy, nil),
+		// The cloud credentials an Entra token is fetched with, by key and value.
+		"cloud-secret":  stamp(base, target, nil, map[string][]byte{"clientSecret": []byte("s1")}),
+		"cloud-secret2": stamp(base, target, nil, map[string][]byte{"clientSecret": []byte("s2")}),
+		"cloud-key":     stamp(base, target, nil, map[string][]byte{"clientId": []byte("s1")}),
 	}
 	mutate := func(name string, f func(*pgclient.Target)) {
 		t := target
 		f(&t)
-		variants[name] = stamp(base, t, nil)
+		variants[name] = stamp(base, t, nil, nil)
 	}
 	mutate("host", func(t *pgclient.Target) { t.Host = "h2" })
 	mutate("port", func(t *pgclient.Target) { t.Port = 6432 })
@@ -165,6 +169,9 @@ func TestStampCoversEverythingTheConnectionIsBuiltFrom(t *testing.T) {
 	mutate("password", func(t *pgclient.Target) { t.Password = "p2" })
 	mutate("servername", func(t *pgclient.Target) { t.ServerName = "n2" })
 	mutate("ca", func(t *pgclient.Target) { t.CABundle = []byte("ca2") })
+	mutate("entra", func(t *pgclient.Target) {
+		t.Token = func(context.Context) (string, error) { return "", nil }
+	})
 	mutate("mintls", func(t *pgclient.Target) { t.MinTLS = 772 })
 	// Length prefixes keep neighbouring fields apart.
 	mutate("split", func(t *pgclient.Target) { t.User, t.Password = "up", "" })

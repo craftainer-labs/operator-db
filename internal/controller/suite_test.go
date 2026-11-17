@@ -176,7 +176,7 @@ func newHarness(t *testing.T, policy common.DeletionPolicy, mutate func(*dbv1alp
 	}
 	srv := &dbv1alpha1.ClusterDatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	srv.Spec.Host = "pg.example.test"
-	srv.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: admin.Name, Namespace: h.ops}
+	srv.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: admin.Name, Namespace: h.ops}
 	srv.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
 	srv.Spec.AllowedExtensions = []string{"pgcrypto"}
 	if mutate != nil {

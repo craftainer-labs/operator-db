@@ -4,9 +4,9 @@
 
 Proposed. The AWS section is implemented by NKdb-1a (password mode) and
 NKdb-1b (IAM mode), the GCP section by NKdb-2, and the Azure section (Password
-mode) by NKdb-3a. NKdb-3b (the Entra administrator login and IAM mode) waits for
-lib-operator-go v0.6.0 and is added to this record as it merges. It becomes
-Accepted when the last of them merges.
+mode) by NKdb-3a, and the Entra administrator login and the Azure IAM mode by
+NKdb-3b (lib-operator-go v0.6.0). It becomes Accepted when the last of them
+merges.
 
 ## Context
 
@@ -14,9 +14,12 @@ A `ClusterDatabaseServer` or `DatabaseServer` today names a PostgreSQL host.
 The plan's Track NK adds managed cloud databases behind the same claim kinds,
 naming, lifecycle and egress rules. The shapes are decided in
 [ADR 0002 section 16 of lib-operator-go](https://github.com/craftainer-labs/lib-operator-go/blob/main/docs/adrs/0002-operator-crd-conventions.md)
-and `docs/crd-drafts.md`, "Cloud providers"; `pkg/cloud` (v0.5.0) resolves the
-credentials and builds the AWS client. The library's `common.ServerStatus` has
-no `discovered` field, and its probe reports only conditions it chooses.
+and `docs/crd-drafts.md`, "Cloud providers"; `pkg/cloud` resolves the
+credentials and builds the cloud clients. From lib-operator-go v0.6.0 the
+server kinds embed `common.CloudServerCommon` (an optional admin Secret
+reference), `common.ServerStatus` has `discovered`, and `server.ResolveCloud`
+and the probe's `CloudProber` read the cloud credentials Secret with the admin
+one.
 
 ## Decision
 
@@ -32,15 +35,15 @@ no `discovered` field, and its probe reports only conditions it chooses.
   a provider; the provider union; exactly one target identifier; only `AWS` is
   accepted until the other clouds land (AWS and GCP now). `provider.type` is
   immutable.
-  `adminCredentialsSecretRef` stays required: the operator logs in to the data
-  plane as an administrator with a password. IAM administrator login is Azure
-  only (decision 4).
+  `adminCredentialsSecretRef` stays required (CEL) in `adminAuthMode: Password`:
+  the operator logs in to the data plane as an administrator with a password.
+  IAM administrator login is Azure only (decision 4; see "Azure Entra").
 - **Control plane.** The probe resolves the instance (`DescribeDBInstances`) or
   the Aurora cluster writer endpoint (`DescribeDBClusters`) with the
   credentials of `spec.credentials`, and records `endpoint`, `port`,
-  `resourceId`, `accountId` and `region` in `status.discovered` (the type
-  `DatabaseServerStatus` embeds `common.ServerStatus` and adds the map; the
-  probe reconciler writes status with a merge patch, which carries it).
+  `resourceId`, `accountId` and `region` in `status.discovered` (the library's
+  `common.ServerStatus.Discovered`, written by the probe reconciler from the
+  `CloudProber`'s result with a merge patch).
   Claims read the cached server's `status.discovered`; a server that has not
   been resolved fails with `ErrNotDiscovered` and is retried. A server's
   credentials Secret is read by the controller; on a cluster server it must be
@@ -55,11 +58,11 @@ no `discovered` field, and its probe reports only conditions it chooses.
   overridden) address, with the same verified TLS. Password mode reuses the
   role logic of the self-hosted backend; the binding gains `cloud`,
   `authMode: Password` and `region`.
-- **IAM mode** is `authMode: IAM` on a `DatabaseRole` of an AWS or a GCP server
-  (see "AWS IAM mode" and "GCP" below). On a server that is not one of these
-  (self-hosted, or a cloud whose IAM mode is not implemented yet, Azure until
-  NKdb-3) the claim is refused with `AuthModeUnsupported` and creates nothing:
-  the gate names the providers that support IAM, it is not "any provider".
+- **IAM mode** is `authMode: IAM` on a `DatabaseRole` of an AWS, a GCP or an
+  Azure server (see "AWS IAM mode", "GCP" and "Azure Entra" below). On a server
+  that is not one of these (self-hosted) the claim is refused with
+  `AuthModeUnsupported` and creates nothing: the gate names the providers that
+  support IAM, it is not "any provider".
   `authMode` is immutable, and CEL forbids `rotationPolicy` with `IAM`.
 - **Reasons.** The library has no constants for the new reasons; they are local
   (`internal/controller/cloud.go`): `CredentialsNamespaceForbidden`,
@@ -243,11 +246,7 @@ no `discovered` field, and its probe reports only conditions it chooses.
   must use `credentials.source: Secret` (keys `clientId` and `clientSecret`),
   `endpointOverride` is on cluster kinds only and honoured only in
   `allow-private`. `adminAuthMode` and `provider.azure.entraAdmin` (the Entra
-  administrator login, decision 4 of the G-api) are not part of this change:
-  the library's `ServerCommon` still requires `adminCredentialsSecretRef` and
-  `server.Resolve` always reads it, so an administrator without a Secret needs
-  the cloud-server types of lib-operator-go v0.6.0 (NKdb-3b). The field name
-  there is `entraAdmin`.
+  administrator login, decision 4 of the G-api) are in "Azure Entra" below.
 - **Credentials.** `credentials.source` is `WorkloadIdentity` (the Azure
   workload identity webhook's variables) or `Secret`; `cloud.Egress.Azure`
   resolves it and its HTTP client dials through the egress policy, the Entra
@@ -278,16 +277,64 @@ no `discovered` field, and its probe reports only conditions it chooses.
   system roots are not enough. Tenant roles are today's Password-mode logic
   unchanged (the admin of a flexible server is a member of `azure_pg_admin`,
   which may create roles); the binding carries `cloud: azure` and
-  `authMode: Password`. `authMode: IAM` is refused with `AuthModeUnsupported` on
-  Azure until NKdb-3b.
+  `authMode: Password`.
 - **Permissions.** The operator's identity needs `Microsoft.DBforPostgreSQL/
   flexibleServers/read` on the server (for example the built-in Reader role
   scoped to it). The operator creates no identity or grant.
 
+### Azure Entra (administrator login and IAM mode)
+
+- **API.** Both server kinds embed `common.CloudServerCommon`: the CRD shape
+  changes only in that `adminCredentialsSecretRef` is optional in the schema,
+  and CEL keeps it required except with `adminAuthMode: IAM` (and forbidden
+  then). A `ClusterDatabaseServer` gains `adminAuthMode` (`Password`, the
+  default, or `IAM`) and `provider.azure.entraAdmin` (1 to 128 characters). CEL:
+  `adminAuthMode: IAM` only with `provider.type: Azure`, `entraAdmin` exactly
+  with `IAM`. Cluster kinds only: a namespaced server cannot use workload
+  identity, so it has no administrator identity to log in with. The status is
+  the library's `common.ServerStatus`, which has `discovered` (the same keys and
+  limits as before), so this is a code-only switch.
+- **Administrator login.** With `adminAuthMode: IAM` the operator logs in as the
+  PostgreSQL user named by `entraAdmin`, the Entra principal name of the
+  identity behind `credentials`, which must be the server's Microsoft Entra
+  administrator. The password of every new connection is an Entra token for
+  `https://ossrdbms-aad.database.windows.net/.default`
+  (`cloud.AzurePostgresScope`) from the same credential that reads Resource
+  Manager (`cloud.AzureTokenSource`, through `cloud.Egress.Azure`, so the
+  egress policy and the server's proxy apply). It is fetched per connect: the
+  pool of the admin session sets it in pgxpool's `BeforeConnect`, and a
+  connection outside the pool gets it when it is opened; the token source
+  caches until a minute before expiry. The pool stamp includes a hash of the
+  cloud credentials Secret (and whether the login is an Entra one), so a
+  rotated credential or a changed mode replaces the pool.
+- **Roles (IAM mode).** The database user is the Entra principal and is named
+  by the claim's `iam.principal` (the deviation of ADR 0002 section 16.4, as on
+  Cloud SQL), 1 to 63 bytes of valid UTF-8 without control characters or
+  surrounding spaces (`IAMPrincipalRequired` otherwise; whether the principal
+  exists in the tenant is for Entra to say). The ownership check runs first
+  and fails closed: a role of that name without the claim's marker is a
+  `NameCollision` and nothing is created. Otherwise the operator calls
+  `SELECT pgaadauth_create_principal('<principal>', false, false)` (not an
+  administrator, not MFA), writes the marker right after, then the grants,
+  connection limit and the final marker, as for Cloud SQL. A crash between the
+  call and the marker leaves an unmarked role that reads as a collision until an
+  administrator removes it. Deleting reassigns what the role owns to the admin
+  role, drops it, and only when it carries the claim's marker. Errors do not
+  name the principal. The binding has `cloud: azure`, `authMode: IAM`, host,
+  port, database, `username` (the principal), `sslmode` and `sslrootcert`, and
+  no password and no `uri`: the consumer logs in with an Entra token for the
+  same scope as the password.
+- **Gate.** The IAM gate of `DatabaseRole` is AWS, GCP and Azure.
+- **Resolution.** Claims resolve their server with `server.ResolveCloud`, which
+  also reads the cloud credentials Secret: a claim on a cloud server whose
+  credentials Secret is missing now fails to resolve (`CredentialsUnavailable`),
+  where before only the discovery needed it. The probe is a `CloudProber`.
+- **Permissions.** As for Password mode; the Entra administrator is a
+  PostgreSQL role the cloud creates, and the operator creates no identity.
+
 ## Consequences
 
-- The drafts' `discovered` lives in a local status type until the library's
-  `ServerStatus` has it; moving it later is not a CRD change.
+- `discovered` is the library's (`common.ServerStatus.Discovered`).
 - Cloud-server tests run against moto (API shape only; moto does not enforce
   IAM) and a TLS PostgreSQL container as the data plane, at a private address
   with `EGRESS_MODE=allow-private` in the test wiring only.

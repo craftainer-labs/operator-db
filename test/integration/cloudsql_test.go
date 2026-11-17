@@ -241,7 +241,7 @@ func TestCloudSQLProbeDiscoversAndConnects(t *testing.T) {
 	defer cancel()
 
 	srv := h.server()
-	version, err := controller.Prober{Config: h.cfg}.Probe(ctx, srv, h.conn)
+	version, err := probeVersion(ctx, controller.Prober{Config: h.cfg}, srv, h.conn, nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestCloudSQLProbeFailuresAreCategories(t *testing.T) {
 
 	// endpointOverride is refused in strict mode, before any request is made.
 	strict := newCloudSQLHarness(t, egress.ModeStrict)
-	_, err := controller.Prober{Config: strict.cfg}.Probe(ctx, strict.server(), strict.conn)
+	_, err := probeVersion(ctx, controller.Prober{Config: strict.cfg}, strict.server(), strict.conn, nil)
 	if !errors.As(err, &ce) || ce.Reason != controller.ReasonEndpointOverrideForbidden {
 		t.Errorf("override in strict mode: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestCloudSQLProbeFailuresAreCategories(t *testing.T) {
 	h := newCloudSQLHarness(t, egress.ModeAllowPrivate)
 	srv := h.server()
 	srv.Spec.Provider.GCP.Location = "us-central1"
-	_, err = controller.Prober{Config: h.cfg}.Probe(ctx, srv, h.conn)
+	_, err = probeVersion(ctx, controller.Prober{Config: h.cfg}, srv, h.conn, nil)
 	if !errors.As(err, &ce) || ce.Reason != controller.ReasonTargetNotFound {
 		t.Errorf("another location: %v", err)
 	}

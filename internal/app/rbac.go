@@ -10,7 +10,7 @@ package app
 // +kubebuilder:rbac:groups=db.craftainer.dev,resources=clusterdatabaseservers/finalizers;databaseservers/finalizers;databases/finalizers;databaseroles/finalizers,verbs=update
 
 // What the controllers touch outside the group. Namespaces: allowedNamespaces
-// selectors (server.Resolve). Secrets: the servers' admin credentials and CA
+// selectors (server.ResolveCloud). Secrets: the servers' admin and cloud credentials and CA
 // bundles are read (a DatabaseServer's live in its own namespace, so this is a
 // ClusterRole rule, not only a Role in the operator namespace) and the binding
 // Secrets are written; the manager's cache of Secrets is restricted to its

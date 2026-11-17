@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -33,6 +34,9 @@ func cloudHarness(t *testing.T, policy common.DeletionPolicy) *harness {
 		s.Spec.Credentials = &cloud.Credentials{Source: cloud.SourceSecret,
 			SecretRef: &cloud.SecretRef{Name: "aws", Namespace: s.Spec.AdminCredentialsSecretRef.Namespace}}
 	})
+	// ResolveCloud reads the credentials Secret of a cloud server.
+	h.must(env.Client.Create(context.Background(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "aws", Namespace: h.ops},
+		Data: map[string][]byte{cloud.KeyAWSAccessKeyID: []byte("id"), cloud.KeyAWSSecretAccessKey: []byte("key")}}))
 	h.get(h.server)
 	h.server.Status.Discovered = map[string]string{
 		"endpoint": "orders.abc.rds.test", "port": "5433", "region": "eu-west-1",

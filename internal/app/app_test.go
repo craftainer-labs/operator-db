@@ -406,12 +406,12 @@ func TestServerProbesWriteTheStatusOfBothKinds(t *testing.T) {
 	admin(opsNS)
 	cluster := &dbv1alpha1.ClusterDatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: "probe-cluster"}}
 	cluster.Spec.Host = "127.0.0.1"
-	cluster.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "pg-admin", Namespace: opsNS}
+	cluster.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "pg-admin", Namespace: opsNS}
 	cluster.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
 	g.Expect(c.Create(ctx, cluster)).To(Succeed())
 	namespaced := &dbv1alpha1.DatabaseServer{ObjectMeta: metav1.ObjectMeta{Name: "probe-team", Namespace: "team"}}
 	namespaced.Spec.Host = "127.0.0.1"
-	namespaced.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "missing"}
+	namespaced.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "missing"}
 	g.Expect(c.Create(ctx, namespaced)).To(Succeed())
 	t.Cleanup(func() { _ = c.Delete(ctx, cluster); _ = c.Delete(ctx, namespaced) })
 

@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
@@ -145,12 +146,17 @@ type cloudSpec struct {
 	azure       cloud.AzureClusterBlock
 	azureTarget dbv1alpha1.AzureTarget
 	creds       *cloud.Credentials
+	// adminIAM says adminAuthMode is IAM: the operator logs in to the data
+	// plane as the Entra administrator entraAdmin, with a token. Azure cluster
+	// servers only.
+	adminIAM   bool
+	entraAdmin string
 	// ns is where a Secret without a namespace of its own lives: the server's.
 	ns string
 }
 
 // cloudOf returns the provider settings of a server, nil for a self-hosted one.
-func cloudOf(srv server.Server) *cloudSpec {
+func cloudOf(srv server.CloudServer) *cloudSpec {
 	switch s := srv.(type) {
 	case *dbv1alpha1.ClusterDatabaseServer:
 		p := s.Spec.Provider
@@ -161,7 +167,8 @@ func cloudOf(srv server.Server) *cloudSpec {
 		case p.GCP != nil:
 			return &cloudSpec{kind: cloud.ProviderGCP, scope: cloud.ScopeCluster, gcp: p.GCP.GCPClusterBlock, gcpTarget: p.GCP.GCPTarget, creds: s.Spec.Credentials}
 		case p.Azure != nil:
-			return &cloudSpec{kind: cloud.ProviderAzure, scope: cloud.ScopeCluster, azure: p.Azure.AzureClusterBlock, azureTarget: p.Azure.AzureTarget, creds: s.Spec.Credentials}
+			return &cloudSpec{kind: cloud.ProviderAzure, scope: cloud.ScopeCluster, azure: p.Azure.AzureClusterBlock, azureTarget: p.Azure.AzureTarget,
+				creds: s.Spec.Credentials, adminIAM: s.Spec.AdminAuthMode == dbv1alpha1.AdminAuthModeIAM, entraAdmin: p.Azure.EntraAdmin}
 		}
 	case *dbv1alpha1.DatabaseServer:
 		p := s.Spec.Provider
@@ -327,7 +334,7 @@ func validEndpoint(h string) bool {
 }
 
 // serverStatusOf returns the status of a server kind of this operator.
-func serverStatusOf(srv server.Server) *dbv1alpha1.DatabaseServerStatus {
+func serverStatusOf(srv server.CloudServer) *common.ServerStatus {
 	switch s := srv.(type) {
 	case *dbv1alpha1.ClusterDatabaseServer:
 		return &s.Status
@@ -337,15 +344,18 @@ func serverStatusOf(srv server.Server) *dbv1alpha1.DatabaseServerStatus {
 	return nil
 }
 
-// record writes the outcome of discovery to the server's status: status.discovered
-// and the CloudResolved condition. A self-hosted server (cs nil) has neither.
-func record(srv server.Server, cs *cloudSpec, disc map[string]string, err error) {
+// record writes the outcome of discovery to the server's status: the
+// CloudResolved condition, and status.discovered when discovery failed (kept
+// through a transient failure, else dropped). A successful discovery is
+// returned to the probe in probe.CloudResult, which writes status.discovered
+// and notices that it changed. A self-hosted server (cs nil) has no
+// CloudResolved condition.
+func record(srv server.CloudServer, cs *cloudSpec, _ map[string]string, err error) {
 	st := serverStatusOf(srv)
 	if st == nil {
 		return
 	}
 	if cs == nil {
-		st.Discovered = nil
 		meta.RemoveStatusCondition(&st.Conditions, ConditionCloudResolved)
 		return
 	}
@@ -365,8 +375,6 @@ func record(srv server.Server, cs *cloudSpec, disc map[string]string, err error)
 		if !errors.As(err, &ce) || !ce.transient || !current {
 			st.Discovered = nil
 		}
-	} else {
-		st.Discovered = disc
 	}
 	meta.SetStatusCondition(&st.Conditions, cond)
 }
