@@ -272,6 +272,41 @@ spec:
                     x-kubernetes-validations:
                     - message: set exactly one of dbInstanceIdentifier and dbClusterIdentifier
                       rule: has(self.dbInstanceIdentifier) != has(self.dbClusterIdentifier)
+                  azure:
+                    description: azure holds the Azure settings (a PostgreSQL flexible
+                      server).
+                    properties:
+                      endpointOverride:
+                        description: EndpointOverride is as on AWSClusterBlock.
+                        maxLength: 2048
+                        pattern: ^https?://[^\s]+$
+                        type: string
+                      resourceGroup:
+                        description: ResourceGroup is the resource group of the resources.
+                        pattern: ^[-\w._()]{1,90}$
+                        type: string
+                      serverName:
+                        description: serverName is the flexible server's name.
+                        maxLength: 63
+                        minLength: 3
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      subscriptionID:
+                        description: SubscriptionID is the subscription of the resources.
+                        pattern: ^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$
+                        type: string
+                      tenantID:
+                        description: TenantID is the Entra tenant.
+                        pattern: ^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$
+                        type: string
+                    required:
+                    - serverName
+                    - tenantID
+                    type: object
+                    x-kubernetes-validations:
+                    - message: subscriptionID and resourceGroup are required for a
+                        flexible server
+                      rule: has(self.subscriptionID) && has(self.resourceGroup)
                   gcp:
                     description: gcp holds the Google Cloud settings (a Cloud SQL
                       instance).
@@ -305,7 +340,7 @@ spec:
                     - message: location is required for a Cloud SQL instance
                       rule: has(self.location) && size(self.location) > 0
                   type:
-                    description: 'type is the cloud: AWS or GCP in this version.'
+                    description: 'type is the cloud: AWS, GCP or Azure.'
                     enum:
                     - AWS
                     - GCP
@@ -322,6 +357,8 @@ spec:
                   rule: 'self.type == ''AWS'' ? has(self.aws) : !has(self.aws)'
                 - message: gcp is required with type GCP and forbidden otherwise
                   rule: 'self.type == ''GCP'' ? has(self.gcp) : !has(self.gcp)'
+                - message: azure is required with type Azure and forbidden otherwise
+                  rule: 'self.type == ''Azure'' ? has(self.azure) : !has(self.azure)'
               proxyURL:
                 description: |-
                   ProxyURL is an http, https or socks5 proxy; unset uses the process
@@ -409,8 +446,9 @@ spec:
                 > 0
             - message: host is required without provider
               rule: has(self.provider) || (has(self.host) && size(self.host) > 0)
-            - message: only provider.type AWS and GCP are supported
-              rule: '!has(self.provider) || self.provider.type in [''AWS'', ''GCP'']'
+            - message: only provider.type AWS, GCP and Azure are supported
+              rule: '!has(self.provider) || self.provider.type in [''AWS'', ''GCP'',
+                ''Azure'']'
             - message: credentials is allowed only with provider
               rule: '!has(self.credentials) || has(self.provider)'
           status:
@@ -483,7 +521,8 @@ spec:
                 description: |-
                   discovered is what the probe read from the cloud: endpoint, port,
                   resourceId, accountId and region on AWS; endpoint, port, region,
-                  instanceConnectionName and dnsName on Cloud SQL.
+                  instanceConnectionName and dnsName on Cloud SQL; endpoint, port, resourceId
+                  and region on an Azure flexible server.
                 maxProperties: 10
                 type: object
                 x-kubernetes-validations:

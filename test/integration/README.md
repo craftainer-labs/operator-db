@@ -73,6 +73,14 @@ own unit tests.
 
 ## Don't
 
+- `azure_test.go` (build tags `integration azure`) — the Azure backend in
+  Password mode (NKdb-3a): a fake of Azure Resource Manager (`servers.get`) and
+  the Entra authority, run as a Go TLS test server at a private address (azcore
+  and MSAL require https; the test's own certificate is trusted through
+  `Config.CloudRootCAs`); the PostgreSQL above is the data plane. Run by the
+  `azure` job with `-tags integration,azure` (the `PG_*` settings only). No
+  Entra token is validated
+  ([NFR-0005](../../docs/nfrs/NFR-0005-cloud-credentials-and-egress.md)).
 - Point the tests at a server that holds anything you want to keep. They only
   create and drop databases and roles with generated names, but they connect
   as the admin role.

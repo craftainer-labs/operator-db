@@ -20,7 +20,7 @@ const (
 	// DiscoveredAccountID is the AWS account that owns the target.
 	DiscoveredAccountID = "accountId"
 	// DiscoveredRegion is the AWS region of the target, or the Cloud SQL
-	// instance's region.
+	// instance's or Azure server's region.
 	DiscoveredRegion = "region"
 	// DiscoveredInstanceConnectionName is the Cloud SQL connection name
 	// (project:location:instance), as the Cloud SQL Admin API reports it.
@@ -89,11 +89,37 @@ type ClusterGCPDatabase struct {
 	GCPTarget             `json:",inline"`
 }
 
+// AzureTarget names the Azure Database for PostgreSQL flexible server a server
+// stands for, in the block's resource group.
+type AzureTarget struct {
+	// serverName is the flexible server's name.
+	// +kubebuilder:validation:MinLength=3
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ServerName string `json:"serverName"`
+}
+
+// AzureDatabase is provider.azure of a namespaced server (no endpointOverride).
+// The subscription and the resource group are needed to address the server.
+// +kubebuilder:validation:XValidation:rule="has(self.subscriptionID) && has(self.resourceGroup)",message="subscriptionID and resourceGroup are required for a flexible server"
+type AzureDatabase struct {
+	cloud.AzureBlock `json:",inline"`
+	AzureTarget      `json:",inline"`
+}
+
+// ClusterAzureDatabase is provider.azure of a cluster server.
+// +kubebuilder:validation:XValidation:rule="has(self.subscriptionID) && has(self.resourceGroup)",message="subscriptionID and resourceGroup are required for a flexible server"
+type ClusterAzureDatabase struct {
+	cloud.AzureClusterBlock `json:",inline"`
+	AzureTarget             `json:",inline"`
+}
+
 // Provider says the server is a managed cloud database. Absent: self-hosted.
 // +kubebuilder:validation:XValidation:rule="self.type == 'AWS' ? has(self.aws) : !has(self.aws)",message="aws is required with type AWS and forbidden otherwise"
 // +kubebuilder:validation:XValidation:rule="self.type == 'GCP' ? has(self.gcp) : !has(self.gcp)",message="gcp is required with type GCP and forbidden otherwise"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Azure' ? has(self.azure) : !has(self.azure)",message="azure is required with type Azure and forbidden otherwise"
 type Provider struct {
-	// type is the cloud: AWS or GCP in this version.
+	// type is the cloud: AWS, GCP or Azure.
 	Type cloud.ProviderType `json:"type"`
 	// aws holds the AWS settings.
 	// +optional
@@ -101,13 +127,17 @@ type Provider struct {
 	// gcp holds the Google Cloud settings (a Cloud SQL instance).
 	// +optional
 	GCP *GCPDatabase `json:"gcp,omitempty"`
+	// azure holds the Azure settings (a PostgreSQL flexible server).
+	// +optional
+	Azure *AzureDatabase `json:"azure,omitempty"`
 }
 
 // ClusterProvider is the provider of a cluster server.
 // +kubebuilder:validation:XValidation:rule="self.type == 'AWS' ? has(self.aws) : !has(self.aws)",message="aws is required with type AWS and forbidden otherwise"
 // +kubebuilder:validation:XValidation:rule="self.type == 'GCP' ? has(self.gcp) : !has(self.gcp)",message="gcp is required with type GCP and forbidden otherwise"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Azure' ? has(self.azure) : !has(self.azure)",message="azure is required with type Azure and forbidden otherwise"
 type ClusterProvider struct {
-	// type is the cloud: AWS or GCP in this version.
+	// type is the cloud: AWS, GCP or Azure.
 	Type cloud.ProviderType `json:"type"`
 	// aws holds the AWS settings.
 	// +optional
@@ -115,6 +145,9 @@ type ClusterProvider struct {
 	// gcp holds the Google Cloud settings (a Cloud SQL instance).
 	// +optional
 	GCP *ClusterGCPDatabase `json:"gcp,omitempty"`
+	// azure holds the Azure settings (a PostgreSQL flexible server).
+	// +optional
+	Azure *ClusterAzureDatabase `json:"azure,omitempty"`
 }
 
 // DatabaseServerStatus is the status of both server kinds: the common one and
@@ -124,7 +157,8 @@ type DatabaseServerStatus struct {
 
 	// discovered is what the probe read from the cloud: endpoint, port,
 	// resourceId, accountId and region on AWS; endpoint, port, region,
-	// instanceConnectionName and dnsName on Cloud SQL.
+	// instanceConnectionName and dnsName on Cloud SQL; endpoint, port, resourceId
+	// and region on an Azure flexible server.
 	//
 	// +kubebuilder:validation:MaxProperties=10
 	// +kubebuilder:validation:XValidation:rule="self.all(k, size(self[k]) <= 512)",message="values are at most 512 characters"

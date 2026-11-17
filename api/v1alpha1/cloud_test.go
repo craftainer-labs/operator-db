@@ -46,6 +46,80 @@ func gcpCluster(name string) *ClusterDatabaseServer {
 	return s
 }
 
+const (
+	testTenant = "00000000-0000-4000-8000-000000000001"
+	testSub    = "00000000-0000-4000-8000-000000000002"
+)
+
+func azureCluster(name string) *ClusterDatabaseServer {
+	s := clusterServerObj(name)
+	s.Spec.Host = ""
+	s.Spec.Provider = &ClusterProvider{Type: cloud.ProviderAzure, Azure: &ClusterAzureDatabase{
+		AzureClusterBlock: cloud.AzureClusterBlock{AzureBlock: cloud.AzureBlock{TenantID: testTenant, SubscriptionID: testSub, ResourceGroup: "rg-orders"}},
+		AzureTarget:       AzureTarget{ServerName: "orders"},
+	}}
+	return s
+}
+
+func azureNamespaced(name string) *DatabaseServer {
+	s := serverObj(name)
+	s.Spec.Host = ""
+	s.Spec.Provider = &Provider{Type: cloud.ProviderAzure, Azure: &AzureDatabase{
+		AzureBlock:  cloud.AzureBlock{TenantID: testTenant, SubscriptionID: testSub, ResourceGroup: "rg-orders"},
+		AzureTarget: AzureTarget{ServerName: "orders"}}}
+	s.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "azure"}}
+	return s
+}
+
+// An Azure flexible server: the provider.azure block, its target, and the rules
+// it shares with the other clouds.
+func TestAzureProviderRules(t *testing.T) {
+	g := NewWithT(t)
+	g.Expect(k8sClient.Create(ctx, azureCluster("az-ok"))).To(Succeed())
+	secret := azureCluster("az-secret")
+	secret.Spec.Credentials = &cloud.Credentials{Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "azure", Namespace: "operator-db-system"}}
+	secret.Spec.Provider.Azure.EndpointOverride = "https://login.example.test:8443"
+	g.Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+	g.Expect(k8sClient.Create(ctx, azureNamespaced("az-ns"))).To(Succeed())
+
+	noBlock := azureCluster("az-no-block")
+	noBlock.Spec.Provider.Azure = nil
+	invalid(t, noBlock, "azure is required with type Azure")
+	wrongType := azureCluster("az-wrong-type")
+	wrongType.Spec.Provider.Type = cloud.ProviderGCP
+	invalid(t, wrongType, "gcp is required with type GCP")
+	awsTypeAzureBlock := azureCluster("aws-type-azure-block")
+	awsTypeAzureBlock.Spec.Provider.Type = cloud.ProviderAWS
+	invalid(t, awsTypeAzureBlock, "aws is required with type AWS")
+	both := gcpCluster("az-and-gcp")
+	both.Spec.Provider.Azure = azureCluster("x").Spec.Provider.Azure
+	invalid(t, both, "azure is required with type Azure and forbidden otherwise")
+	for name, mutate := range map[string]func(*ClusterAzureDatabase){
+		"no-sub":        func(a *ClusterAzureDatabase) { a.SubscriptionID = "" },
+		"no-group":      func(a *ClusterAzureDatabase) { a.ResourceGroup = "" },
+		"bad-sub":       func(a *ClusterAzureDatabase) { a.SubscriptionID = "not-a-guid" },
+		"no-tenant":     func(a *ClusterAzureDatabase) { a.TenantID = "" },
+		"no-server":     func(a *ClusterAzureDatabase) { a.ServerName = "" },
+		"short-server":  func(a *ClusterAzureDatabase) { a.ServerName = "ab" },
+		"upper-server":  func(a *ClusterAzureDatabase) { a.ServerName = "Orders" },
+		"hyphen-server": func(a *ClusterAzureDatabase) { a.ServerName = "orders-" },
+	} {
+		s := azureCluster("az-" + name)
+		mutate(s.Spec.Provider.Azure)
+		invalid(t, s, "")
+	}
+	noGroupNS := azureNamespaced("az-ns-no-group")
+	noGroupNS.Spec.Provider.Azure.ResourceGroup = ""
+	invalid(t, noGroupNS, "subscriptionID and resourceGroup are required")
+	noSub := azureCluster("az-no-sub-msg")
+	noSub.Spec.Provider.Azure.SubscriptionID = ""
+	invalid(t, noSub, "subscriptionID and resourceGroup are required")
+	// A namespaced server cannot use WorkloadIdentity.
+	wi := azureNamespaced("az-ns-wi")
+	wi.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceWorkloadIdentity}
+	invalid(t, wi, "must use source Secret")
+}
+
 func gcpNamespaced(name string) *DatabaseServer {
 	s := serverObj(name)
 	s.Spec.Host = ""
@@ -123,10 +197,10 @@ func TestProviderRules(t *testing.T) {
 	invalid(t, noBlock, "aws is required with type AWS")
 	azure := awsCluster("azure")
 	azure.Spec.Provider.Type = cloud.ProviderAzure
-	invalid(t, azure, "only provider.type AWS and GCP are supported")
+	invalid(t, azure, "azure is required with type Azure")
 	azureNS := awsNamespaced("azure-ns")
 	azureNS.Spec.Provider.Type = cloud.ProviderAzure
-	invalid(t, azureNS, "only provider.type AWS and GCP are supported")
+	invalid(t, azureNS, "azure is required with type Azure")
 	// The block must be the one of the type.
 	gcpTypeAWSBlock := awsCluster("gcp-type-aws-block")
 	gcpTypeAWSBlock.Spec.Provider.Type = cloud.ProviderGCP

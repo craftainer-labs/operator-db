@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -65,7 +66,14 @@ type Config struct {
 	// SQLAdmin builds the Cloud SQL Admin client of a GCP server
 	// (NewSQLAdmin in production). It must be set for a GCP server.
 	SQLAdmin func(context.Context, *cloud.GCPClient) (SQLAdminAPI, error)
-	Connect  ConnectFunc
+	// ARM builds the Azure Resource Manager client of an Azure server (NewARM
+	// in production). It must be set for an Azure server.
+	ARM func(*cloud.AzureClient, string) (ARMAPI, error)
+	// CloudRootCAs are the roots the cloud API clients trust, nil for the
+	// system's. Production leaves it nil; a test of an emulator that serves TLS
+	// with its own CA sets it.
+	CloudRootCAs *x509.CertPool
+	Connect      ConnectFunc
 	// Cache keeps the connection pool of each server between reconciles; nil
 	// opens a connection for every use.
 	Cache *ServerCache

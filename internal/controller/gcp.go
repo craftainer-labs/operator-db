@@ -142,7 +142,7 @@ func (c Config) gcpAPI(ctx context.Context, cs *cloudSpec, conn server.Connectio
 	if err != nil {
 		return nil, nil, err
 	}
-	e := cloud.Egress{Mode: c.EgressMode, Policy: c.Egress, Proxy: conn.Proxy}
+	e := cloud.Egress{Mode: c.EgressMode, Policy: c.Egress, Proxy: conn.Proxy, RootCAs: c.CloudRootCAs}
 	gc, err := e.GCP(ctx, cs.scope, cs.gcp, cs.creds, secret)
 	if err != nil {
 		return nil, nil, egressErr(err)

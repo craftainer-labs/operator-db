@@ -125,7 +125,10 @@ type cloudSpec struct {
 	// gcp and gcpTarget are provider.gcp.
 	gcp       cloud.GCPClusterBlock
 	gcpTarget dbv1alpha1.GCPTarget
-	creds     *cloud.Credentials
+	// azure and azureTarget are provider.azure.
+	azure       cloud.AzureClusterBlock
+	azureTarget dbv1alpha1.AzureTarget
+	creds       *cloud.Credentials
 	// ns is where a Secret without a namespace of its own lives: the server's.
 	ns string
 }
@@ -141,6 +144,8 @@ func cloudOf(srv server.Server) *cloudSpec {
 			return &cloudSpec{kind: cloud.ProviderAWS, scope: cloud.ScopeCluster, block: p.AWS.AWSClusterBlock, target: p.AWS.AWSTarget, creds: s.Spec.Credentials}
 		case p.GCP != nil:
 			return &cloudSpec{kind: cloud.ProviderGCP, scope: cloud.ScopeCluster, gcp: p.GCP.GCPClusterBlock, gcpTarget: p.GCP.GCPTarget, creds: s.Spec.Credentials}
+		case p.Azure != nil:
+			return &cloudSpec{kind: cloud.ProviderAzure, scope: cloud.ScopeCluster, azure: p.Azure.AzureClusterBlock, azureTarget: p.Azure.AzureTarget, creds: s.Spec.Credentials}
 		}
 	case *dbv1alpha1.DatabaseServer:
 		p := s.Spec.Provider
@@ -152,13 +157,16 @@ func cloudOf(srv server.Server) *cloudSpec {
 		case p.GCP != nil:
 			return &cloudSpec{kind: cloud.ProviderGCP, scope: cloud.ScopeNamespaced, gcp: cloud.GCPClusterBlock{GCPBlock: p.GCP.GCPBlock},
 				gcpTarget: p.GCP.GCPTarget, creds: s.Spec.Credentials.AsCredentials(), ns: s.Namespace}
+		case p.Azure != nil:
+			return &cloudSpec{kind: cloud.ProviderAzure, scope: cloud.ScopeNamespaced, azure: cloud.AzureClusterBlock{AzureBlock: p.Azure.AzureBlock},
+				azureTarget: p.Azure.AzureTarget, creds: s.Spec.Credentials.AsCredentials(), ns: s.Namespace}
 		}
 	}
 	return nil
 }
 
 // discover reads the data-plane address of a cloud server from the cloud's
-// API (RDS, or the Cloud SQL Admin API), with the operator's credentials to
+// API (RDS, the Cloud SQL Admin API or Azure Resource Manager), with the operator's credentials to
 // the cloud (WorkloadIdentity or the Secret of credentials.secretRef). Every
 // HTTP connection dials through the egress policy. It returns nil for a
 // self-hosted server. The errors are *CloudError, a category each.
@@ -169,11 +177,14 @@ func (c Config) discover(ctx context.Context, cs *cloudSpec, conn server.Connect
 	if cs.kind == cloud.ProviderGCP {
 		return c.discoverGCP(ctx, cs, conn)
 	}
+	if cs.kind == cloud.ProviderAzure {
+		return c.discoverAzure(ctx, cs, conn)
+	}
 	secret, err := c.cloudSecret(ctx, cs)
 	if err != nil {
 		return nil, err
 	}
-	e := cloud.Egress{Mode: c.EgressMode, Policy: c.Egress, Proxy: conn.Proxy}
+	e := cloud.Egress{Mode: c.EgressMode, Policy: c.Egress, Proxy: conn.Proxy, RootCAs: c.CloudRootCAs}
 	cfg, err := e.AWS(ctx, cs.scope, cs.block, cs.creds, secret)
 	if err != nil {
 		return nil, egressErr(err)

@@ -182,7 +182,7 @@ with TLS (verify-full, scram-sha-256) in the integration lane,
 devcontainer locally); the 100% coverage gate stays on the unit profile. The non-functional requirements are in
 [`docs/nfrs`](docs/nfrs).
 
-## Cloud databases (AWS RDS and Cloud SQL)
+## Cloud databases (AWS RDS, Cloud SQL and Azure)
 
 A server can stand for an Amazon RDS instance or Aurora cluster instead of a
 host: set `spec.provider` (`type: AWS`, `aws.region`, and one of
@@ -227,6 +227,20 @@ through the Cloud SQL connector with IAM authentication. The operator needs
 [ADR 0005](docs/adrs/0005-cloud-backends.md) and
 [NFR-0005](docs/nfrs/NFR-0005-cloud-credentials-and-egress.md).
 
+A server can stand for an Azure Database for PostgreSQL flexible server:
+`spec.provider` with `type: Azure` and `azure: {tenantID, subscriptionID,
+resourceGroup, serverName}` (all four are required; `endpointOverride` is for
+emulators). `credentials.source` is `WorkloadIdentity` (the default on a
+`ClusterDatabaseServer`) or `Secret` with `clientId` and `clientSecret` keys. The
+operator reads the server's host name, region and resource id from Azure
+Resource Manager (`status.discovered`; the server must be `Ready`) and logs in
+as the administrator of `adminCredentialsSecretRef` over verified TLS, so set
+`tls.caBundle` when the system roots do not cover the server's certificate. The
+operator needs read access to the server
+(`Microsoft.DBforPostgreSQL/flexibleServers/read`). Password claims work as on any
+server; `authMode: IAM` and an Entra administrator login are not available on
+Azure yet and are refused with `AuthModeUnsupported`.
+
 ## Binding Secret
 
 A `DatabaseRole` writes its login to the Secret named by `spec.binding.secretName`
@@ -246,7 +260,7 @@ keys:
 | `sslrootcert` | The PEM CA bundle that the server's `spec.tls.caBundle` refers to, for the client to pin. The key is present and empty when the server has no bundle. |
 | `uri` | A complete `postgresql://user:password@host:port/database?sslmode=...` URI built from the keys above. It carries the password, like the Secret does. It has no CA: pass `sslrootcert` to the client separately. |
 
-On a cloud server the Secret adds `cloud` (`aws` or `gcp`) and `authMode`
+On a cloud server the Secret adds `cloud` (`aws`, `gcp` or `azure`) and `authMode`
 (`Password` or `IAM`), and `region` on AWS or `instanceConnectionName`
 (`project:location:instance`) on Cloud SQL. In `IAM` mode it has **no `password`
 and no `uri`**, its `username` is the one login role (it never changes; on Cloud
