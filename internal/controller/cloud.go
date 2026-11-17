@@ -49,6 +49,10 @@ const (
 	// ReasonAuthModeUnsupported is the claim reason of an authMode the server
 	// cannot serve.
 	ReasonAuthModeUnsupported = "AuthModeUnsupported"
+	// ReasonRotationNotApplicable is the Warning Event of the rotate annotation
+	// on an IAM-mode claim: there is no credential to rotate (ADR 0002,
+	// section 16.4).
+	ReasonRotationNotApplicable = "RotationNotApplicable"
 )
 
 var (
@@ -58,6 +62,9 @@ var (
 	// ErrAuthModeUnsupported means the claim asks for an authMode this server
 	// cannot serve.
 	ErrAuthModeUnsupported = errors.New("AuthModeUnsupported: authMode IAM is not supported by this server")
+	// ErrIAMTargetUnknown means the server's account, region or resource id has
+	// not been discovered, so the ARN of an IAM login cannot be built yet.
+	ErrIAMTargetUnknown = errors.New("the account, region and resource id of the cloud server have not been discovered yet")
 )
 
 // CloudError is a failure to resolve a cloud server. Reason is one of the

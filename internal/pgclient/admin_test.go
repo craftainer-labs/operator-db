@@ -245,7 +245,14 @@ func TestRoleObserve(t *testing.T) {
 	if st.Login(GenA) != st.A || st.Login(GenB) != st.B {
 		t.Error("Login picks the wrong role")
 	}
-	f.want(t, `rolname IN ('r', 'r_a', 'r_b')`)
+	f.want(t, `rolname IN ('r', 'r_a', 'r_b')`, `g.rolname = 'rds_iam'`)
+	if st.Base.RDSIAM || st.A.RDSIAM {
+		t.Errorf("rds_iam membership read from rows without it: %+v", st)
+	}
+	f.rows[0].rows[0]["rdsiam"] = "true"
+	if st, err = f.admin().Role(ctx, "r"); err != nil || !st.Base.RDSIAM || st.A.RDSIAM {
+		t.Errorf("rds_iam member: %+v, %v", st, err)
+	}
 
 	f = &fakePG{}
 	st, err = f.admin().Role(ctx, "r")
@@ -535,5 +542,76 @@ func TestDropOwnRoles(t *testing.T) {
 	f = &fakePG{failOn: "pg_roles"}
 	if _, err := f.admin().DropOwnRoles(ctx, "r", claim, "db"); !errors.Is(err, errBoom) {
 		t.Errorf("failing read: %v", err)
+	}
+}
+
+// iamRoleRows is the one login role of an IAM-mode claim, as Observe reads it.
+func iamRoleRows(base, comment string) []scripted {
+	return []scripted{{"FROM pg_roles", []Row{
+		{"name": base, "login": "true", "connlimit": "-1", "comment": comment, "rdsiam": "true"},
+	}}}
+}
+
+// An IAM-mode role is one login role with rds_iam and no password, quoted as
+// an identifier, with its marker written with the role and again after the
+// grants.
+func TestApplyIAMRole(t *testing.T) {
+	ctx := context.Background()
+	p := RoleParams{
+		Base: `team-a_a"pp_x`, Database: "team-a_db_y", Marker: Marker{Claim: "team-a/app/uid-1", Privileges: ReadWrite},
+		ConnLimit: 7, Privileges: ReadWrite,
+	}
+	f := &fakePG{}
+	if err := f.admin().ApplyIAMRole(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	q := `"team-a_a""pp_x"`
+	f.want(t,
+		`|CREATE ROLE `+q+` LOGIN; COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1'`,
+		`|ALTER ROLE `+q+` WITH LOGIN PASSWORD NULL CONNECTION LIMIT 7`,
+		`|GRANT "rds_iam" TO `+q,
+		`|GRANT CONNECT ON DATABASE "team-a_db_y" TO `+q,
+		`team-a_db_y|GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO `+q,
+		`|COMMENT ON ROLE `+q+` IS 'craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite'`)
+	f.wantNot(t, "NOLOGIN", "SET role")
+	if strings.Contains(strings.ReplaceAll(f.joined(), "PASSWORD NULL", ""), "PASSWORD") {
+		t.Errorf("a password is set:\n%s", f.joined())
+	}
+	if last := f.stmts[len(f.stmts)-1]; !strings.HasPrefix(last, `|COMMENT ON ROLE `) {
+		t.Errorf("the marker is not written last: %v", f.stmts)
+	}
+
+	// A role of ours is updated, not created again; Owner gets ALL.
+	f = &fakePG{rows: iamRoleRows(p.Base, "craftainer.dev/claim=team-a/app/uid-1 privileges=ReadWrite")}
+	p.Privileges = Owner
+	if err := f.admin().ApplyIAMRole(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	f.wantNot(t, "CREATE ROLE")
+	f.want(t, `|GRANT "rds_iam" TO `+q, `GRANT ALL ON DATABASE "team-a_db_y" TO `+q)
+
+	// A role of that name that is not ours is refused before any statement,
+	// whether it has another claim's marker, a comment that is no marker or none.
+	for _, comment := range []string{"craftainer.dev/claim=someone/else/uid", "hand made", ""} {
+		f = &fakePG{rows: iamRoleRows(p.Base, comment)}
+		if err := f.admin().ApplyIAMRole(ctx, p); !errors.Is(err, ErrNotOwned) {
+			t.Errorf("comment %q: %v", comment, err)
+		}
+		f.wantNot(t, "CREATE", "ALTER", "GRANT", "COMMENT ON")
+	}
+
+	bad := p
+	bad.Privileges = "Root"
+	if err := (&fakePG{}).admin().ApplyIAMRole(ctx, bad); !errors.Is(err, ErrInvalidPrivileges) {
+		t.Errorf("unknown privileges: %v", err)
+	}
+	if err := (&fakePG{failOn: "pg_roles"}).admin().ApplyIAMRole(ctx, p); !errors.Is(err, errBoom) {
+		t.Errorf("observe failure: %v", err)
+	}
+	for _, fail := range []string{"CREATE ROLE", "ON SCHEMA public", "COMMENT ON ROLE"} {
+		f = &fakePG{failOn: fail}
+		if err := f.admin().ApplyIAMRole(ctx, p); !errors.Is(err, errBoom) {
+			t.Errorf("failOn %q: %v", fail, err)
+		}
 	}
 }

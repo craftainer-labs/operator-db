@@ -2,8 +2,8 @@
 
 ## Status
 
-Implemented for the AWS backend in password mode (NKdb-1a). IAM mode (NKdb-1b)
-and the GCP and Azure backends add to its verification.
+Implemented for the AWS backend in password mode (NKdb-1a) and IAM mode
+(NKdb-1b). The GCP and Azure backends add to its verification.
 
 ## Attribute
 
@@ -32,7 +32,11 @@ plan Track NK, rows EB-2, EB-3, EB-5, EB-9 and EB-14).
   tenant's.
 - The operator never creates or edits its own cloud identity, trust policy or
   grants. Its AWS permissions are `rds:DescribeDBInstances` and
-  `rds:DescribeDBClusters` (password mode).
+  `rds:DescribeDBClusters`. In IAM mode it builds no token and holds no
+  `rds-db:connect`: the consumer's own role does, on the ARN in the binding.
+- An IAM-mode binding has no password and no `uri`; the role it names is
+  created without a password and is the claim's only if it carries the claim's
+  marker, so a tenant cannot take over or drop another role.
 
 ## Source
 
@@ -46,13 +50,21 @@ ADR 0002 section 16 of lib-operator-go.
 - Unit (`internal/controller`): `TestCloudSecret` (namespace refusal, missing
   Secret), `TestDiscover` (strict mode refuses an override, malformed Secret),
   `TestDescribeFailuresAreCategories` (SDK text does not leak),
-  `TestCloudServerBackendAndBinding`; CEL in `api/v1alpha1`
+  `TestCloudServerBackendAndBinding`, `TestIAMRoleLifecycle` and
+  `TestIAMRolePreconditions` (no password and the ARN in the binding, no
+  rotation, drop); `TestApplyIAMRole` in `internal/pgclient` (quoting, the
+  ownership check before any statement); CEL in `api/v1alpha1`
   (`TestProviderRules`).
 - Integration (`.github/workflows/integration.yml`, job `rds`): moto server and
   the TLS PostgreSQL at private container addresses with `allow-private` in the
   test wiring (`TestRDSProbeDiscoversAndConnects`,
-  `TestRDSProbeFailuresAreCategories`).
+  `TestRDSProbeFailuresAreCategories`), and for IAM mode `TestRDSIAMRole`
+  (login role, `rds_iam` membership, no password, privileges, drop),
+  `TestRDSIAMRoleNameCollision` (a role that is not the claim's is left alone)
+  and `TestRDSIAMResourceARN` (the ARN against what moto reports).
 - **Untested in CI:** that real AWS accepts the operator's credentials, the
   WorkloadIdentity chain (IRSA, Pod Identity), AssumeRole through `roleARN`, and
-  RDS IAM token validation (NKdb-1b). moto does not enforce IAM; there is no
-  real-cloud lane.
+  RDS IAM token validation: whether RDS accepts a token for the login role and
+  the `rds-db:connect` policy on the ARN in the binding (the test PostgreSQL has
+  a stand-in `rds_iam` role and does not validate tokens). moto does not enforce
+  IAM; there is no real-cloud lane.

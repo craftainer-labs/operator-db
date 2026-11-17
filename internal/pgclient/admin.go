@@ -244,10 +244,17 @@ type RoleInfo struct {
 	Exists    bool
 	Login     bool
 	ConnLimit int32
+	// RDSIAM says the role is a member of rds_iam, so RDS accepts an IAM token
+	// as its password (ADR 0005, IAM mode).
+	RDSIAM bool
 	// Marker is the ownership marker in the role's comment; the zero Marker
 	// when it has none.
 	Marker Marker
 }
+
+// RDSIAMRole is the RDS role whose members log in with an IAM token. The
+// operator only grants it; RDS creates it.
+const RDSIAMRole = "rds_iam"
 
 // RoleState is the owner role and both logins of a DatabaseRole.
 type RoleState struct {
@@ -269,10 +276,13 @@ func (a Admin) Role(ctx context.Context, base string) (RoleState, error) {
 	err := a.with(ctx, "", func(s Session) error {
 		names := []string{Literal(base), Literal(LoginName(base, GenA)), Literal(LoginName(base, GenB))}
 		rows, err := s.Query(ctx, "SELECT rolname AS name, rolcanlogin::text AS login, rolconnlimit::text AS connlimit, "+
-			"coalesce(shobj_description(oid, 'pg_authid'), '') AS comment FROM pg_roles WHERE rolname IN ("+
+			"coalesce(shobj_description(oid, 'pg_authid'), '') AS comment, "+
+			"EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = pg_roles.oid AND g.rolname = "+
+			Literal(RDSIAMRole)+")::text AS rdsiam FROM pg_roles WHERE rolname IN ("+
 			strings.Join(names, ", ")+")")
 		for _, r := range rows {
-			info := RoleInfo{Exists: true, Login: r["login"] == "true", ConnLimit: atoi(r["connlimit"]), Marker: ParseMarker(r["comment"])}
+			info := RoleInfo{Exists: true, Login: r["login"] == "true", ConnLimit: atoi(r["connlimit"]),
+				RDSIAM: r["rdsiam"] == "true", Marker: ParseMarker(r["comment"])}
 			switch r["name"] {
 			case base:
 				st.Base, st.Marker = info, info.Marker
@@ -344,7 +354,7 @@ func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 	create := func(name string) string {
 		return "CREATE ROLE " + Ident(name) + " NOLOGIN; " + commentOn("ROLE", name, owned)
 	}
-	base, db, limit := Ident(p.Base), Ident(p.Database), strconv.Itoa(int(p.ConnLimit))
+	base, limit := Ident(p.Base), strconv.Itoa(int(p.ConnLimit))
 	var stmts []string
 	if !st.Base.Exists {
 		stmts = append(stmts, create(p.Base))
@@ -360,11 +370,25 @@ func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 		}
 		stmts = append(stmts, alter, "GRANT "+base+" TO "+login, "ALTER ROLE "+login+" SET role = "+Literal(p.Base))
 	}
+	stmts = append(stmts, databaseAccess(p)...)
+	return a.apply(ctx, p, stmts, grants)
+}
+
+// databaseAccess is what a role may do to its database itself: connect, and
+// everything for an Owner.
+func databaseAccess(p RoleParams) []string {
+	base, db := Ident(p.Base), Ident(p.Database)
 	access := "CONNECT"
 	if p.Privileges == Owner {
 		access = "ALL"
 	}
-	stmts = append(stmts, "REVOKE ALL ON DATABASE "+db+" FROM "+base, "GRANT "+access+" ON DATABASE "+db+" TO "+base)
+	return []string{"REVOKE ALL ON DATABASE " + db + " FROM " + base, "GRANT " + access + " ON DATABASE " + db + " TO " + base}
+}
+
+// apply runs the statements of the server's admin database, then the grants on
+// the role's own database and, last, the full marker, so it never records
+// privileges that were not applied.
+func (a Admin) apply(ctx context.Context, p RoleParams, stmts, grants []string) error {
 	if err := a.with(ctx, "", func(s Session) error { return execAll(ctx, s, stmts) }); err != nil {
 		return err
 	}
@@ -372,6 +396,39 @@ func (a Admin) ApplyRole(ctx context.Context, p RoleParams) error {
 		return err
 	}
 	return a.with(ctx, "", func(s Session) error { return s.Exec(ctx, commentOn("ROLE", p.Base, p.Marker)) })
+}
+
+// ApplyIAMRole is ApplyRole for an IAM-mode claim on RDS (ADR 0005): one login
+// role named Base, without a password (a stored one is cleared) and a member
+// of rds_iam, so the tenant logs in with an IAM token. It gets the same privileges as the
+// owner role of ApplyRole, directly. Password is not used.
+//
+// The ownership check comes first and fails closed: a role of that name that
+// exists without this claim's marker is refused (ErrNotOwned) before any
+// statement runs, so a tenant can never take over or change another role. A new
+// role is created together with its marker in one query.
+func (a Admin) ApplyIAMRole(ctx context.Context, p RoleParams) error {
+	grants, err := privilegeStatements(p.Base, p.Privileges)
+	if err != nil {
+		return err
+	}
+	st, err := a.Role(ctx, p.Base)
+	if err != nil {
+		return err
+	}
+	if st.Base.Exists && st.Base.Marker.Claim != p.Marker.Claim {
+		return fmt.Errorf("%w: %q", ErrNotOwned, p.Base)
+	}
+	base := Ident(p.Base)
+	var stmts []string
+	if !st.Base.Exists {
+		stmts = append(stmts, "CREATE ROLE "+base+" LOGIN; "+commentOn("ROLE", p.Base, Marker{Claim: p.Marker.Claim}))
+	}
+	stmts = append(stmts,
+		"ALTER ROLE "+base+" WITH LOGIN PASSWORD NULL CONNECTION LIMIT "+strconv.Itoa(int(p.ConnLimit)),
+		"GRANT "+Ident(RDSIAMRole)+" TO "+base)
+	stmts = append(stmts, databaseAccess(p)...)
+	return a.apply(ctx, p, stmts, grants)
 }
 
 // privilegeStatements revoke and then grant the access of a privilege level on
