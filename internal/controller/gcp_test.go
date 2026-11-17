@@ -360,7 +360,7 @@ func TestDescribeCloudSQL(t *testing.T) {
 	}
 
 	// An address that is not a routable unicast one is never used.
-	for _, ip := range []string{"127.0.0.1", "0.0.0.0", "169.254.169.254", "224.0.0.1", "not an ip", ""} {
+	for _, ip := range []string{"127.0.0.1", "0.0.0.0", "169.254.169.254", "224.0.0.1", "::ffff:127.0.0.1", "not an ip", ""} {
 		f.instance = instanceWith(t, func(m map[string]any) {
 			m["ipAddresses"] = []any{map[string]any{"type": "PRIMARY", "ipAddress": ip}}
 		})
