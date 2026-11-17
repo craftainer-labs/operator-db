@@ -7,12 +7,12 @@
 // internal/controller now. cloudsqlconn is the connector a consumer of an IAM
 // binding uses; the operator itself logs in to Cloud SQL with the admin
 // password (ADR 0005), so nothing here imports it until a decision says
-// otherwise. azidentity waits for the Azure backend (NKdb-3). The tools build
+// otherwise. azidentity is imported by internal/controller now (the Azure
+// backend, NKdb-3a). The tools build
 // tag keeps this file out of every build and test; tidy still reads it. Delete
 // an entry once a package imports the same module.
 package clouddeps
 
 import (
 	_ "cloud.google.com/go/cloudsqlconn"
-	_ "github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 )

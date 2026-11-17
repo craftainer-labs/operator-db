@@ -503,8 +503,12 @@ func (e *roleExternal) data(gen, password string) binding.Data {
 }
 
 // cloudKeys adds the keys of a cloud binding that depend on the provider: the
-// cloud, and the AWS region or the Cloud SQL connection name.
+// cloud, and the AWS region or the Cloud SQL connection name (Azure adds nothing).
 func (e *roleExternal) cloudKeys(d binding.Data) {
+	if e.be.provider == cloud.ProviderAzure {
+		d["cloud"] = []byte("azure")
+		return
+	}
 	if e.be.provider == cloud.ProviderGCP {
 		d["cloud"] = []byte("gcp")
 		d["instanceConnectionName"] = []byte(e.be.cs.connectionName())

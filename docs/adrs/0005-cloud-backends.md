@@ -3,8 +3,10 @@
 ## Status
 
 Proposed. The AWS section is implemented by NKdb-1a (password mode) and
-NKdb-1b (IAM mode), the GCP section by NKdb-2; Azure (NKdb-3) follows and is
-added to this record as it merges. It becomes Accepted when the last of them merges.
+NKdb-1b (IAM mode), the GCP section by NKdb-2, and the Azure section (Password
+mode) by NKdb-3a. NKdb-3b (the Entra administrator login and IAM mode) waits for
+lib-operator-go v0.6.0 and is added to this record as it merges. It becomes
+Accepted when the last of them merges.
 
 ## Context
 
@@ -227,6 +229,61 @@ no `discovered` field, and its probe reports only conditions it chooses.
   `cloudsql.instances.get` alone for a server that serves only Password
   claims. The operator creates no identity or grant.
 
+### Azure (Database for PostgreSQL flexible server), Password mode
+
+- **API.** `spec.provider` takes `type: Azure` and `azure: {tenantID,
+  subscriptionID, resourceGroup, serverName, endpointOverride?}`
+  (`cloud.AzureBlock` / `cloud.AzureClusterBlock` plus `serverName`, 3 to 63
+  lowercase letters, digits and inner hyphens). The library leaves
+  `subscriptionID` and `resourceGroup` optional because Graph-based operators
+  have none; a flexible server cannot be addressed without them, so CEL
+  requires both on both kinds. CEL on the server spec now admits `AWS`, `GCP`
+  and `Azure`, and each block is required exactly with its type. The rules of
+  AWS apply unchanged: `host` is optional with a provider, a namespaced server
+  must use `credentials.source: Secret` (keys `clientId` and `clientSecret`),
+  `endpointOverride` is on cluster kinds only and honoured only in
+  `allow-private`. `adminAuthMode` and `provider.azure.entraAdmin` (the Entra
+  administrator login, decision 4 of the G-api) are not part of this change:
+  the library's `ServerCommon` still requires `adminCredentialsSecretRef` and
+  `server.Resolve` always reads it, so an administrator without a Secret needs
+  the cloud-server types of lib-operator-go v0.6.0 (NKdb-3b). The field name
+  there is `entraAdmin`.
+- **Credentials.** `credentials.source` is `WorkloadIdentity` (the Azure
+  workload identity webhook's variables) or `Secret`; `cloud.Egress.Azure`
+  resolves it and its HTTP client dials through the egress policy, the Entra
+  authority included. With `endpointOverride` the override is both the Entra
+  authority (which MSAL requires to be https) and the Resource Manager
+  endpoint, which is what an emulator that serves both needs. Errors are
+  categories: the SDK text, the subscription, the resource group and the
+  server name never reach a condition, Event or log from this code. A
+  credential the authority refuses is `CredentialsUnavailable`; an authority
+  that cannot be reached is transient. `endpointOverride` is for emulators: the
+  Entra token minted for the public Resource Manager audience is sent to the
+  override host, which only a cluster administrator in `allow-private` mode can
+  set. `resourceGroup` must not end with a period, which also rules out `.` and
+  `..` in the request path.
+- **Discovery.** The probe calls `servers.get` of Resource Manager
+  (`armpostgresqlflexibleservers/v6`, resource provider registration off: the
+  operator only reads) and records `endpoint` (the server's
+  `fullyQualifiedDomainName`), `port` (5432), `region` (the server's location)
+  and `resourceId` (the ARM id) in `status.discovered`. The host name must be a
+  plain DNS name and the server's state `Ready` (a stopped or starting server
+  has no usable address for now: a `CloudError`, transient only while it is
+  Starting or Updating). A missing server is `TargetNotFound`;
+  throttling, timeouts and 5xx answers are transient (the last address is kept).
+- **Admin connection and roles.** The password Secret of
+  `adminCredentialsSecretRef`, over the same verified TLS as every other server,
+  to the server's host name. The server's certificate chains to a public root
+  that is not always in the operator's image, so set `tls.caBundle` when the
+  system roots are not enough. Tenant roles are today's Password-mode logic
+  unchanged (the admin of a flexible server is a member of `azure_pg_admin`,
+  which may create roles); the binding carries `cloud: azure` and
+  `authMode: Password`. `authMode: IAM` is refused with `AuthModeUnsupported` on
+  Azure until NKdb-3b.
+- **Permissions.** The operator's identity needs `Microsoft.DBforPostgreSQL/
+  flexibleServers/read` on the server (for example the built-in Reader role
+  scoped to it). The operator creates no identity or grant.
+
 ## Consequences
 
 - The drafts' `discovered` lives in a local status type until the library's
@@ -238,9 +295,16 @@ no `discovered` field, and its probe reports only conditions it chooses.
   CI cannot verify. The IAM role's SQL runs against PostgreSQL 18 with a
   stand-in `rds_iam` role; no emulator validates an IAM token, so the login with
   a token is untested in CI.
-- The operator now imports the AWS SDK (`service/rds`) and the Cloud SQL Admin
-  API client (`google.golang.org/api/sqladmin/v1`), which grow its module
-  graph; all modules are Apache-2.0.
+- The operator now imports the AWS SDK (`service/rds`), the Cloud SQL Admin
+  API client (`google.golang.org/api/sqladmin/v1`) and the Azure PostgreSQL
+  flexible servers management client (`armpostgresqlflexibleservers/v6`), which
+  grow its module graph; all modules are Apache-2.0 or MIT.
+- Resource Manager has no emulator. Its calls are tested against an HTTP fake
+  (TLS, because azcore and MSAL refuse plain http for authenticated requests)
+  that returns a recorded `servers.get` shape and also acts as the Entra
+  authority, reached through `cloud.Egress.Azure` with a client secret. The
+  integration job runs the same fake as a Go test server and the TLS PostgreSQL
+  container as the "Azure" data plane.
 - sqladmin has no emulator. Its calls are tested against an HTTP fake that
   returns recorded response shapes (`instances.get`, `users.insert` and
   `users.delete`, `operations.get`), reached through `cloud.Egress.GCP` with a

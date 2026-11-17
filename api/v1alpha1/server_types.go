@@ -81,7 +81,7 @@ type PostgreSQL struct {
 // ClusterDatabaseServerSpec defines the desired state of ClusterDatabaseServer.
 // +kubebuilder:validation:XValidation:rule="has(self.adminCredentialsSecretRef.namespace) && size(self.adminCredentialsSecretRef.namespace) > 0",message="adminCredentialsSecretRef.namespace is required on a cluster server: name the operator's namespace"
 // +kubebuilder:validation:XValidation:rule="has(self.provider) || (has(self.host) && size(self.host) > 0)",message="host is required without provider"
-// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type in ['AWS', 'GCP']",message="only provider.type AWS and GCP are supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type in ['AWS', 'GCP', 'Azure']",message="only provider.type AWS, GCP and Azure are supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
 type ClusterDatabaseServerSpec struct {
 	common.ServerCommon `json:",inline"`
@@ -106,7 +106,7 @@ type ClusterDatabaseServerSpec struct {
 // server serves only claims in its own namespace and has no allowedNamespaces.
 // +kubebuilder:validation:XValidation:rule="!has(self.adminCredentialsSecretRef.namespace)",message="adminCredentialsSecretRef.namespace is forbidden on a namespaced server: the Secret is in the server's namespace"
 // +kubebuilder:validation:XValidation:rule="has(self.provider) || (has(self.host) && size(self.host) > 0)",message="host is required without provider"
-// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type in ['AWS', 'GCP']",message="only provider.type AWS and GCP are supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type in ['AWS', 'GCP', 'Azure']",message="only provider.type AWS, GCP and Azure are supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || has(self.credentials)",message="a namespaced server with a provider must set credentials with source Secret: it cannot use WorkloadIdentity"
 type DatabaseServerSpec struct {

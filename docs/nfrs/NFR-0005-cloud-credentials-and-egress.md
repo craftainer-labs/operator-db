@@ -3,7 +3,8 @@
 ## Status
 
 Implemented for the AWS backend in password mode (NKdb-1a) and IAM mode
-(NKdb-1b) and for the GCP backend (Cloud SQL, NKdb-2). The Azure backend adds to
+(NKdb-1b), for the GCP backend (Cloud SQL, NKdb-2) and for the Azure backend in
+Password mode (NKdb-3a). The Azure Entra login and IAM mode (NKdb-3b) add to
 its verification.
 
 ## Attribute
@@ -48,6 +49,11 @@ plan Track NK, rows EB-2, EB-3, EB-5, EB-9 and EB-14).
   Cloud SQL Admin API client is the one `cloud.Egress.GCP` builds (token
   endpoint included); its error text, which names the project, the instance
   and the principal, is never kept.
+- The Azure client is the one `cloud.Egress.Azure` builds (the Entra authority
+  included, over https only); Resource Manager's error text, which names the
+  subscription, the resource group and the server, is never kept. The operator's
+  Azure permission is read access to the flexible server
+  (`Microsoft.DBforPostgreSQL/flexibleServers/read`).
 
 ## Source
 
@@ -87,6 +93,24 @@ ADR 0002 section 16 of lib-operator-go.
   (login role, `rds_iam` membership, no password, privileges, drop),
   `TestRDSIAMRoleNameCollision` (a role that is not the claim's is left alone)
   and `TestRDSIAMResourceARN` (the ARN against what moto reports).
+- Unit, Azure (`internal/controller/azure_test.go`): `TestDescribeAzure` and
+  `TestDescribeAzureFailuresAreCategories` (a recorded `servers.get` shape
+  through `cloud.Egress.Azure` with a fake Entra authority; the API text and
+  the subscription do not leak; a refused client secret is
+  `CredentialsUnavailable`), `TestDiscoverAzureClientErrors` (strict mode
+  refuses `endpointOverride`, a missing or incomplete Secret),
+  `TestProberDiscoversTheAzureAddress`, `TestAzurePasswordRole` (the binding;
+  no Resource Manager call in Password mode; IAM refused); CEL
+  (`TestAzureProviderRules`).
+- Integration (job `azure`): the Resource Manager and Entra fake as a Go TLS
+  test server and the TLS PostgreSQL at a private address
+  (`TestAzureProbeDiscoversAndConnects`, `TestAzureProbeFailuresAreCategories`).
+- **Untested in CI (Azure):** Resource Manager and Entra against the real
+  services: that Azure accepts the operator's credentials, the workload identity
+  chain (AKS), the shape of a real `servers.get` answer beyond the recorded one,
+  and that the admin of a flexible server may run the Password-mode statements.
+  Entra token validation, the Entra administrator login and `pgaadauth` belong
+  to NKdb-3b and are untested in CI there too (no emulator).
 - **Untested in CI (GCP):** sqladmin and IAM token validation against a real
   service: that Cloud SQL accepts the operator's credentials, the
   WorkloadIdentity chain (GKE), `users.insert` and `users.delete` with real
